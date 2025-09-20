@@ -3,16 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from core.note.models import Note, Chapter, Paragraph
-
-
-def _sec2hms(sec: float) -> str:
-    s = int(sec)
-    ms = int(round((sec - s) * 1000))
-    h = s // 3600
-    m = (s % 3600) // 60
-    s2 = s % 60
-    return f"{h:02d}:{m:02d}:{s2:02d}.{ms:03d}"
+from core.note.models import Note, Paragraph
 
 
 class MarkdownExporter:
@@ -29,36 +20,64 @@ class MarkdownExporter:
         lines: list[str] = []
 
         for ci, ch in enumerate(note.chapters, start=1):
-            # 章标题提升为一级标题
-            lines.append(f"# 第{ci}章 {ch.title} [{_sec2hms(ch.start_sec)} - {_sec2hms(ch.end_sec)}]")
+            # 章标题为一级标题
+            lines.append(f"# 第{ci}章 {ch.title}")
             lines.extend(self._render_paragraphs(ci, ch.paragraphs))
 
         out_file.write_text("\n".join(lines), encoding="utf-8")
         return out_file
 
     def _render_paragraphs(self, ci: int, paragraphs: Iterable[Paragraph]) -> list[str]:
+        """渲染一章内的所有段落（含递归子段）。
+
+        规则：
+        - 顶层段落使用二级标题（##）。
+        - 子段落标题相较父级增加 1 个 #（最多不超过 6）。
+        - 标题格式统一：`<#...#> <编号> <标题> [<start> - <end>]`。
+        - 每个段落输出其图片（若有）与行列表；随后递归输出其子段。
+        """
         out: list[str] = []
         for pi, p in enumerate(paragraphs, start=1):
-            # 段落标题提升为二级标题
-            out.append(f"## {ci}.{pi} {p.title} [{_sec2hms(p.start_sec)} - {_sec2hms(p.end_sec)}]")
-            if p.image and p.image.hi_res_image_path:
-                # 使用相对路径（相对于 outputs_root）
-                img_path = p.image.hi_res_image_path
-                try:
-                    img_rel = img_path.relative_to(self.outputs_root)
-                except Exception:
-                    from os.path import relpath
-                    img_rel = Path(relpath(img_path, start=self.outputs_root))
-                out.append("")
-                out.append(f"![]({img_rel.as_posix()})")
-                out.append("")
-            for s in p.lines:
-                out.append(f"- {s.line_no} [{_sec2hms(s.start_sec)} - {_sec2hms(s.end_sec)}] {s.text}")
+            idx_prefix = f"{ci}.{pi}"
+            out.extend(self._render_single_paragraph(heading_level=2, idx_prefix=idx_prefix, p=p))
+        return out
+
+    def _render_single_paragraph(self, heading_level: int, idx_prefix: str, p: Paragraph) -> list[str]:
+        """递归渲染单个段落及其子段。
+
+        参数：
+        - heading_level: 标题层级（2 表示顶层段落使用 ##）。
+        - idx_prefix: 编号前缀，例如 "1.2"、"1.2.3"。
+        - p: 段落对象。
+        """
+        out: list[str] = []
+
+        # 生成标题行：根据层级生成对应数量的 '#'
+        level = max(1, min(6, heading_level))
+        hashes = "#" * level
+        out.append(f"{hashes} {idx_prefix} {p.title}")
+
+        # 图片（若有）：使用相对路径（相对于 outputs_root）
+        if p.image and p.image.hi_res_image_path:
+            img_path = p.image.hi_res_image_path
+            try:
+                img_rel = img_path.relative_to(self.outputs_root)
+            except Exception:
+                from os.path import relpath
+                img_rel = Path(relpath(img_path, start=self.outputs_root))
             out.append("")
-            if p.children:
-                # 子段落标题同样提升
-                out.append("### 子段落")
-                for ci2, c in enumerate(p.children, start=1):
-                    out.append(f"- {p.title}.{ci2} [{_sec2hms(c.start_sec)} - {_sec2hms(c.end_sec)}] {c.title}")
-                out.append("")
+            out.append(f"![]({img_rel.as_posix()})")
+            out.append("")
+
+        # 字幕行
+        for s in p.lines:
+            out.append(f"- {s.text}")
+        out.append("")
+
+        # 递归子段：层级 +1，编号前缀追加
+        if p.children:
+            for ci2, c in enumerate(p.children, start=1):
+                child_prefix = f"{idx_prefix}.{ci2}"
+                out.extend(self._render_single_paragraph(heading_level=level + 1, idx_prefix=child_prefix, p=c))
+
         return out

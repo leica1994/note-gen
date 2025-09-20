@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from time import perf_counter
 from typing import List, Dict, Any, Set, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -46,6 +48,11 @@ class NoteGenerator:
         self.mm_llm = MultiModalLLM(config.mm_llm)
         self.screenshotter = Screenshotter(config.screenshot)
         self.logger = logger or logging.getLogger("note_gen.generator")
+        # 并发与限流：
+        self._text_sem = threading.Semaphore(max(1, self.cfg.text_llm.concurrency))
+        self._mm_sem = threading.Semaphore(max(1, self.cfg.mm_llm.concurrency))
+        # 全局截图串行：确保任意时刻仅有一个截图过程（低清与高清）在运行
+        self._shot_sem = threading.Semaphore(1)
 
     def _render_all_subtitles(self, meta: GenerationInputMeta) -> str:
         lines = []
@@ -66,6 +73,7 @@ class NoteGenerator:
             "以下是完整字幕（包含行号与时间戳）。请给出章节边界：\n\n" + self._render_all_subtitles(meta)
         ))
         t0 = perf_counter()
+        # 单次调用，无需并发限流
         result = self.text_llm.structured_invoke(ChaptersSchema, [sys, human], json_mode=False)
         self.logger.info("分章完成", extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter()-t0)*1000)})
         # 证据
@@ -99,7 +107,9 @@ class NoteGenerator:
             f"章节标题：{chapter_title}\n请对以下字幕行进行结构化分段：\n\n" + "\n".join(content_lines) + extra
         ))
         t0 = perf_counter()
-        result = self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
+        # 受文本 LLM 并发限制
+        with self._text_sem:
+            result = self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
         self.logger.info("分段完成", extra={"paragraphs": len(result.paragraphs), "cost_ms": int((perf_counter()-t0)*1000)})
         return result
 
@@ -134,11 +144,15 @@ class NoteGenerator:
         if sorted(input_ids) != sorted(out_ids):
             raise ValueError("分段行号集合与输入集合不一致，存在缺失或重复")
 
-        # 每段落内行时间应在段落区间内
+        # 每段落内行时间应在段落区间内，且段落边界应等于该段落所有行的最小开始/最大结束
         for p in paras:
             for l in p.lines:
                 if not (p.start_sec - 0.05 <= l.start_sec <= l.end_sec <= p.end_sec + 0.05):
                     raise ValueError("段落内行时间越界")
+            min_line_start = min(l.start_sec for l in p.lines)
+            max_line_end = max(l.end_sec for l in p.lines)
+            if abs(p.start_sec - min_line_start) > 0.05 or abs(p.end_sec - max_line_end) > 0.05:
+                raise ValueError("段落边界应等于该段落所有行的最小开始与最大结束")
 
     def _analyze_coverage_issue(self, segs: List[SubtitleSegment], paras: List[ParagraphSchema]) -> Dict[str, Any]:
         """分析段落覆盖问题（缺失/多余/重复/重叠/覆盖缺口）。"""
@@ -163,12 +177,21 @@ class NoteGenerator:
         max_in = max(s.end_sec for s in segs)
         coverage_ok = bool(ranges) and (abs(ranges[0][0] - min_in) <= 0.05 and abs(ranges[-1][1] - max_in) <= 0.05)
 
+        # 段落边界与内部行时间不一致的统计
+        out_of_bounds = 0
+        for p in paras:
+            min_line_start = min(l.start_sec for l in p.lines) if p.lines else p.start_sec
+            max_line_end = max(l.end_sec for l in p.lines) if p.lines else p.end_sec
+            if not (abs(p.start_sec - min_line_start) <= 0.05 and abs(p.end_sec - max_line_end) <= 0.05):
+                out_of_bounds += 1
+
         return {
             "missing": missing,
             "extra": extra,
             "duplicate": sorted(list(duplicate)),
             "overlap": overlap,
             "coverage_ok": coverage_ok,
+            "boundary_mismatch": out_of_bounds,
         }
 
     def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int) -> int:
@@ -178,7 +201,9 @@ class NoteGenerator:
             "要求：避免过渡帧，画面清晰稳定；返回 index 为 1..9 的整数。\n"
             f"段落标题：{para.title}\n段落内容：\n{text}"
         )
-        result = self.mm_llm.structured_choose(SelectedIndexSchema, instruction, str(grid_path))
+        # 受多模态 LLM 并发限制
+        with self._mm_sem:
+            result = self.mm_llm.structured_choose(SelectedIndexSchema, instruction, str(grid_path))
         if self.cfg.export.save_prompts_and_raw:
             self.evidence.write_text(f"chapters/{ci}/para_{pi}/choose_image_instruction.txt", instruction)
             self.evidence.write_json(f"chapters/{ci}/para_{pi}/choose_image_result.json", result.model_dump())
@@ -198,48 +223,42 @@ class NoteGenerator:
             children=children,
         )
 
-    def generate(self, meta: GenerationInputMeta, task_out_dir: Path) -> Note:
-        # 1) 分章
-        chs = self._prompt_for_chapters(meta)
-        chapters: List[Chapter] = []
-        if self.cfg.export.save_prompts_and_raw:
-            # 保存分章证据已在 _prompt_for_chapters 中记录，此处不重复
-            pass
+    def _process_chapter(self, ci: int, cb: ChapterBoundary, meta: GenerationInputMeta, task_out_dir: Path) -> Chapter:
+        self.logger.info("处理章节", extra={"chapter_index": ci, "title": cb.title})
+        segs = self._select_lines(meta.subtitle.items, cb.start_line_no, cb.end_line_no)
+        if not segs:
+            raise ValueError(f"章节无内容：{cb}")
 
-        for ci, cb in enumerate(chs.chapters, start=1):
-            self.logger.info("处理章节", extra={"chapter_index": ci, "title": cb.title})
-            segs = self._select_lines(meta.subtitle.items, cb.start_line_no, cb.end_line_no)
-            if not segs:
-                raise ValueError(f"章节无内容：{cb}")
+        # 分段（业务重试，最多3次）
+        max_attempts = 3
+        last_issue: Dict[str, Any] | None = None
+        pgs: ParagraphsSchema | None = None
+        for attempt in range(1, max_attempts + 1):
+            fix_note = None
+            if last_issue:
+                parts = []
+                if last_issue.get("missing"):
+                    parts.append(f"缺失行号: {last_issue['missing']}")
+                if last_issue.get("extra"):
+                    parts.append(f"多余行号: {last_issue['extra']}")
+                if last_issue.get("duplicate"):
+                    parts.append(f"重复行号: {last_issue['duplicate']}")
+                if last_issue.get("overlap"):
+                    parts.append("段落时间重叠")
+                if not last_issue.get("coverage_ok", True):
+                    parts.append("时间未完整覆盖章节范围")
+                if last_issue.get("boundary_mismatch"):
+                    parts.append("段落边界必须等于该段落所有行的最小开始与最大结束；禁止修改任一行的时间戳")
+                fix_note = "；".join(parts)
 
-            # 2) 分段（带业务重试，最多3次）
-            max_attempts = 3
-            last_issue: Dict[str, Any] | None = None
-            pgs: ParagraphsSchema | None = None
-            for attempt in range(1, max_attempts + 1):
-                fix_note = None
-                if last_issue:
-                    parts = []
-                    if last_issue.get("missing"):
-                        parts.append(f"缺失行号: {last_issue['missing']}")
-                    if last_issue.get("extra"):
-                        parts.append(f"多余行号: {last_issue['extra']}")
-                    if last_issue.get("duplicate"):
-                        parts.append(f"重复行号: {last_issue['duplicate']}")
-                    if last_issue.get("overlap"):
-                        parts.append("段落时间重叠")
-                    if not last_issue.get("coverage_ok", True):
-                        parts.append("时间未完整覆盖章节范围")
-                    fix_note = "；".join(parts)
+            pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note)
 
-                pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note)
-
-                # 证据：按尝试次数归档
-                if self.cfg.export.save_prompts_and_raw:
-                    content_lines = []
-                    for s in segs:
-                        content_lines.append(f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}")
-                    prompt_text = (
+            # 证据：按尝试次数归档
+            if self.cfg.export.save_prompts_and_raw:
+                content_lines = []
+                for s in segs:
+                    content_lines.append(f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}")
+                prompt_text = (
                         "你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。\n"
                         "严格要求：\n"
                         "- 覆盖所有提供的字幕行；\n"
@@ -249,75 +268,102 @@ class NoteGenerator:
                         "- 不做摘要或改写；\n"
                         "- 若没有子段落，children 必须返回空数组 []，不要返回空对象 {} 或 null；\n"
                         "- 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。\n\n"
-                        f"章节标题：{cb.title}\n" + "\n".join(content_lines) + (f"\n\n修正提示：{fix_note}" if fix_note else "")
-                    )
-                    self.evidence.write_text(f"chapters/{ci}/attempt_{attempt}/paragraphs_prompt.txt", prompt_text)
-                    self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/paragraphs_result.json", pgs.model_dump())
+                        f"章节标题：{cb.title}\n" + "\n".join(content_lines) + (
+                            f"\n\n修正提示：{fix_note}" if fix_note else "")
+                )
+                self.evidence.write_text(f"chapters/{ci}/attempt_{attempt}/paragraphs_prompt.txt", prompt_text)
+                self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/paragraphs_result.json", pgs.model_dump())
 
-                try:
-                    self._validate_time_coverage(segs, pgs.paragraphs)
-                    self.logger.info("章节校验通过", extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt})
-                    break
-                except Exception:
-                    issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
-                    last_issue = issue
-                    self.logger.info("章节校验失败，准备重试", extra={"chapter_index": ci, "attempt": attempt, **issue})
-                    if attempt >= max_attempts:
-                        raise ValueError("分段行号集合与输入集合不一致，存在缺失或重复")
+            try:
+                self._validate_time_coverage(segs, pgs.paragraphs)
+                self.logger.info("章节校验通过", extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt})
+                break
+            except Exception:
+                issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
+                last_issue = issue
+                self.logger.info("章节校验失败，准备重试", extra={"chapter_index": ci, "attempt": attempt, **issue})
+                if attempt >= max_attempts:
+                    raise ValueError("分段行号集合与输入集合不一致，存在缺失或重复")
 
-            assert pgs is not None
+        assert pgs is not None
 
-            paragraphs: List[Paragraph] = []
-            for pi, ps in enumerate(pgs.paragraphs, start=1):
-                # 递归转换
-                para = self._convert_paragraph(ps)
-
-                # 3) 生成九宫格并让多模态选择
-                timestamps = generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
-                thumbs_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "thumbs"
-                grid_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "grid.jpg"
-                t_s = perf_counter()
+        # 段落并发：截图→九宫格→多模态→高清
+        def _process_para(pi: int, ps: ParagraphSchema) -> Paragraph:
+            # 递归转换
+            para = self._convert_paragraph(ps)
+            # 生成九宫格并选择
+            timestamps = generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
+            thumbs_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "thumbs"
+            grid_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "grid.jpg"
+            t_s = perf_counter()
+            with self._shot_sem:
                 thumbs = self.screenshotter.capture_thumbs(Path(meta.video_path), timestamps, thumbs_dir)
                 self.screenshotter.compose_grid(thumbs, grid_path)
-                self.logger.info("生成九宫格完成", extra={
-                    "chapter_index": ci,
-                    "para_index": pi,
-                    "grid": str(grid_path),
-                    "cost_ms": int((perf_counter()-t_s)*1000),
-                })
-
-                chosen_idx = self._choose_best_frame(para, grid_path, ci, pi)
-                chosen_ts = timestamps[chosen_idx - 1]
-
-                # 4) 高清重拍
-                hi_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "hi.jpg"
-                t_hq = perf_counter()
+            self.logger.info("生成九宫格完成", extra={
+                "chapter_index": ci,
+                "para_index": pi,
+                "grid": str(grid_path),
+                "cost_ms": int((perf_counter()-t_s)*1000),
+            })
+            chosen_idx = self._choose_best_frame(para, grid_path, ci, pi)
+            chosen_ts = timestamps[chosen_idx - 1]
+            # 高清重拍
+            hi_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "hi.jpg"
+            t_hq = perf_counter()
+            with self._shot_sem:
                 self.screenshotter.capture_high_quality(Path(meta.video_path), chosen_ts, hi_path)
-                self.logger.info("高清重拍完成", extra={
-                    "chapter_index": ci,
-                    "para_index": pi,
-                    "chosen_index": chosen_idx,
-                    "timestamp_sec": chosen_ts,
-                    "hi_image": str(hi_path),
-                    "cost_ms": int((perf_counter()-t_hq)*1000),
-                })
-
-                para.image = ParagraphImage(
-                    grid_image_path=grid_path,
-                    grid_timestamps_sec=timestamps,
-                    chosen_index=chosen_idx,
-                    chosen_timestamp_sec=chosen_ts,
-                    hi_res_image_path=hi_path,
-                )
-                paragraphs.append(para)
-
-            chapter = Chapter(
-                title=cb.title,
-                start_sec=min(s.start_sec for s in segs),
-                end_sec=max(s.end_sec for s in segs),
-                paragraphs=paragraphs,
+            self.logger.info("高清重拍完成", extra={
+                "chapter_index": ci,
+                "para_index": pi,
+                "chosen_index": chosen_idx,
+                "timestamp_sec": chosen_ts,
+                "hi_image": str(hi_path),
+                "cost_ms": int((perf_counter()-t_hq)*1000),
+            })
+            para.image = ParagraphImage(
+                grid_image_path=grid_path,
+                grid_timestamps_sec=timestamps,
+                chosen_index=chosen_idx,
+                chosen_timestamp_sec=chosen_ts,
+                hi_res_image_path=hi_path,
             )
-            chapters.append(chapter)
+            return para
+
+        paragraphs: List[Paragraph] = [None] * len(pgs.paragraphs)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=max(1, self.cfg.screenshot.max_workers)) as ex:
+            future_map = {}
+            for idx, ps in enumerate(pgs.paragraphs, start=1):
+                fut = ex.submit(_process_para, idx, ps)
+                future_map[fut] = idx
+            for fut in as_completed(future_map):
+                idx = future_map[fut]
+                paragraphs[idx - 1] = fut.result()
+
+        chapter = Chapter(
+            title=cb.title,
+            start_sec=min(s.start_sec for s in segs),
+            end_sec=max(s.end_sec for s in segs),
+            paragraphs=paragraphs,  # type: ignore[arg-type]
+        )
+        return chapter
+
+    def generate(self, meta: GenerationInputMeta, task_out_dir: Path) -> Note:
+        # 1) 分章
+        chs = self._prompt_for_chapters(meta)
+        if self.cfg.export.save_prompts_and_raw:
+            # 保存分章证据已在 _prompt_for_chapters 中记录，此处不重复
+            pass
+
+        # 2) 章节并发处理
+        chapters: List[Chapter] = [None] * len(chs.chapters)  # type: ignore[list-item]
+        with ThreadPoolExecutor(max_workers=max(1, self.cfg.text_llm.concurrency)) as ex:
+            future_map = {}
+            for ci, cb in enumerate(chs.chapters, start=1):
+                fut = ex.submit(self._process_chapter, ci, cb, meta, task_out_dir)
+                future_map[fut] = ci
+            for fut in as_completed(future_map):
+                ci = future_map[fut]
+                chapters[ci - 1] = fut.result()
 
         note = Note(
             video_path=Path(meta.video_path),

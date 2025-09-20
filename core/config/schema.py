@@ -18,10 +18,11 @@ class LLMConfig(BaseModel):
     base_url: Optional[str] = Field(default=None, description="OpenAI 兼容服务地址")
     api_key: Optional[str] = Field(default=None, description="API Key（GUI 输入，日志脱敏）")
     model: str = Field(default="gpt-4o", description="模型名称，如 gpt-4o / o4-mini 等")
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="采样温度")
+    # 采样温度：默认 0.7（与 cache.json 缺省一致）
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="采样温度")
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
-    request_timeout: int = Field(default=120, description="请求超时（秒）")
-    concurrency: int = Field(default=1, ge=1, le=4, description="并发上限（当前串行处理建议为1）")
+    request_timeout: int = Field(default=300, description="请求超时（秒）")
+    concurrency: int = Field(default=10, ge=1, le=64, description="并发上限（默认10，按需限流）")
 
 
 class MultiModalConfig(LLMConfig):
@@ -40,6 +41,7 @@ class ScreenshotConfig(BaseModel):
     grid_rows: int = Field(default=3, description="九宫格行数")
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
     include_endpoints: bool = Field(default=True, description="九宫格是否包含区间两端点")
+    max_workers: int = Field(default=1, ge=1, le=64, description="截图/段落处理并发数（固定串行建议设为1）")
 
     @property
     def grid_count(self) -> int:

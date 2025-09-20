@@ -161,22 +161,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_api_key = QtWidgets.QLineEdit(self.cfg.text_llm.api_key or "")
         self.edit_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.edit_model = QtWidgets.QLineEdit(self.cfg.text_llm.model)
+        self.spin_text_conc = QtWidgets.QSpinBox()
+        self.spin_text_conc.setRange(1, 64)
+        self.spin_text_conc.setValue(self.cfg.text_llm.concurrency)
         self.btn_test_llm = QtWidgets.QPushButton("测试文本LLM连通性")
 
         self.edit_mm_base_url = QtWidgets.QLineEdit(self.cfg.mm_llm.base_url or "")
         self.edit_mm_api_key = QtWidgets.QLineEdit(self.cfg.mm_llm.api_key or "")
         self.edit_mm_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.edit_mm_model = QtWidgets.QLineEdit(self.cfg.mm_llm.model)
+        self.spin_mm_conc = QtWidgets.QSpinBox()
+        self.spin_mm_conc.setRange(1, 64)
+        self.spin_mm_conc.setValue(self.cfg.mm_llm.concurrency)
         self.btn_test_mm = QtWidgets.QPushButton("测试多模态LLM连通性")
 
         cfg_layout.addRow("文本LLM base_url", self.edit_base_url)
         cfg_layout.addRow("文本LLM api_key", self.edit_api_key)
         cfg_layout.addRow("文本LLM model", self.edit_model)
+        cfg_layout.addRow("文本LLM并发", self.spin_text_conc)
         cfg_layout.addRow(self.btn_test_llm)
         cfg_layout.addRow(QtWidgets.QLabel("——"))
         cfg_layout.addRow("多模态 base_url", self.edit_mm_base_url)
         cfg_layout.addRow("多模态 api_key", self.edit_mm_api_key)
         cfg_layout.addRow("多模态 model", self.edit_mm_model)
+        cfg_layout.addRow("多模态并发", self.spin_mm_conc)
         cfg_layout.addRow(self.btn_test_mm)
 
         left_layout.addWidget(file_group)
@@ -212,6 +220,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_mm_base_url.textChanged.connect(self._schedule_save_config)
         self.edit_mm_api_key.textChanged.connect(self._schedule_save_config)
         self.edit_mm_model.textChanged.connect(self._schedule_save_config)
+        self.spin_text_conc.valueChanged.connect(self._schedule_save_config)
+        self.spin_mm_conc.valueChanged.connect(self._schedule_save_config)
 
     # 左侧交互
     def _pick_video(self):
@@ -283,9 +293,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.text_llm.base_url = self.edit_base_url.text() or None
             self.cfg.text_llm.api_key = self.edit_api_key.text() or None
             self.cfg.text_llm.model = self.edit_model.text()
+            self.cfg.text_llm.concurrency = int(self.spin_text_conc.value())
             self.cfg.mm_llm.base_url = self.edit_mm_base_url.text() or None
             self.cfg.mm_llm.api_key = self.edit_mm_api_key.text() or None
             self.cfg.mm_llm.model = self.edit_mm_model.text()
+            self.cfg.mm_llm.concurrency = int(self.spin_mm_conc.value())
             ConfigCache().save(self.cfg)
         except Exception:
             # 静默失败，不打断用户操作；关闭时会再尝试

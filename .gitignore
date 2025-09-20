@@ -1,0 +1,49 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境与本地配置
+.venv/
+venv/
+.env
+.env.*
+.python-version
+
+# 构建与分发
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# IDE/编辑器
+.idea/
+.vscode/
+*.iml
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 测试与报告
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 项目生成产物
+outputs/
+evidence/
+logs/
+cache.json
+
+# 其他临时/日志
+*.log
+*.tmp
+*.swp
+*.swo
+
+uv.lock
