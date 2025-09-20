@@ -72,6 +72,7 @@ class Worker(QtCore.QThread):
                 },
                 "screenshot": self.cfg.screenshot.model_dump(mode="json"),
                 "export": self.cfg.export.model_dump(mode="json"),
+                "note": getattr(self.cfg, 'note', None).model_dump(mode="json") if getattr(self.cfg, 'note', None) else {"mode": "subtitle"},
             })
 
             self.progress_changed.emit(5)
@@ -95,7 +96,7 @@ class Worker(QtCore.QThread):
             })
             self.progress_changed.emit(85)
             # 3) 导出 Markdown
-            exporter = MarkdownExporter(self.cfg.export.outputs_root)
+            exporter = MarkdownExporter(self.cfg.export.outputs_root, note_mode=(self.cfg.note.mode if getattr(self.cfg, 'note', None) else 'subtitle'))
             md = exporter.export(note, filename=f"{self.task.task_id}.md")
             logger.info("导出 Markdown 完成", extra={"path": str(md)})
             self.progress_changed.emit(100)
@@ -135,9 +136,12 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setOrientation(QtCore.Qt.Orientation.Horizontal)
         self.setCentralWidget(splitter)
 
-        # 左侧：上-文件选择，下-参数配置
-        left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left)
+        # 左侧：使用 Tab 组织（任务与参数 / 笔记参数配置）
+        left = QtWidgets.QTabWidget()
+
+        # Tab1：任务与参数
+        tab_general = QtWidgets.QWidget()
+        tab_general_layout = QtWidgets.QVBoxLayout(tab_general)
 
         # 文件选择区
         file_group = QtWidgets.QGroupBox("选择文件/文件夹并添加任务")
@@ -186,8 +190,25 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg_layout.addRow("多模态并发", self.spin_mm_conc)
         cfg_layout.addRow(self.btn_test_mm)
 
-        left_layout.addWidget(file_group)
-        left_layout.addWidget(cfg_group)
+        tab_general_layout.addWidget(file_group)
+        tab_general_layout.addWidget(cfg_group)
+        left.addTab(tab_general, "任务与参数")
+
+        # Tab2：笔记参数配置
+        tab_note = QtWidgets.QWidget()
+        note_layout = QtWidgets.QFormLayout(tab_note)
+        self.combo_note_mode = QtWidgets.QComboBox()
+        self.combo_note_mode.addItem("字幕模式", userData="subtitle")
+        self.combo_note_mode.addItem("AI优化模式", userData="optimized")
+        # 初始化：根据配置回填
+        try:
+            current_mode = (self.cfg.note.mode if getattr(self.cfg, 'note', None) else 'subtitle') or 'subtitle'
+        except Exception:
+            current_mode = 'subtitle'
+        idx = 0 if current_mode == 'subtitle' else 1
+        self.combo_note_mode.setCurrentIndex(idx)
+        note_layout.addRow("笔记模式", self.combo_note_mode)
+        left.addTab(tab_note, "笔记参数配置")
 
         # 右侧：任务列表
         right = QtWidgets.QWidget()
@@ -221,6 +242,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_mm_model.textChanged.connect(self._schedule_save_config)
         self.spin_text_conc.valueChanged.connect(self._schedule_save_config)
         self.spin_mm_conc.valueChanged.connect(self._schedule_save_config)
+        # 笔记模式变更
+        self.combo_note_mode.currentIndexChanged.connect(self._schedule_save_config)
 
     # 左侧交互
     def _pick_video(self):
@@ -297,6 +320,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.mm_llm.api_key = self.edit_mm_api_key.text() or None
             self.cfg.mm_llm.model = self.edit_mm_model.text()
             self.cfg.mm_llm.concurrency = int(self.spin_mm_conc.value())
+            # 笔记模式
+            data = self.combo_note_mode.currentData()
+            mode = data if isinstance(data, str) else 'subtitle'
+            # 若缺少 note 字段，补默认
+            if not getattr(self.cfg, 'note', None):
+                from core.config.schema import NoteConfig
+                self.cfg.note = NoteConfig()
+            self.cfg.note.mode = mode
             ConfigCache().save(self.cfg)
         except Exception:
             # 静默失败，不打断用户操作；关闭时会再尝试

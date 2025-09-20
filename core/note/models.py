@@ -23,6 +23,7 @@ class Paragraph(BaseModel):
     lines: List[SubtitleSegment]
     children: List["Paragraph"] = Field(default_factory=list)
     image: Optional[ParagraphImage] = None
+    optimized: List[str] = Field(default_factory=list, description="AI 优化后的段落内容（去语气词、加标点、组合为流畅句子；可分段则多项；可含 Markdown 标记重点）")
 
 
 class Chapter(BaseModel):
@@ -70,6 +71,7 @@ class ParagraphSchema(BaseModel):
     end_sec: float
     lines: List[ParagraphLine]
     children: List["ParagraphSchema"] = Field(default_factory=list)
+    optimized: List[str] = Field(default_factory=list)
 
     @field_validator("children", mode="before")
     @classmethod

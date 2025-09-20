@@ -9,9 +9,11 @@ from core.note.models import Note, Paragraph
 class MarkdownExporter:
     """将 Note 导出为 Markdown 文件。"""
 
-    def __init__(self, outputs_root: Path) -> None:
+    def __init__(self, outputs_root: Path, note_mode: str = "subtitle") -> None:
         self.outputs_root = Path(outputs_root)
         self.outputs_root.mkdir(parents=True, exist_ok=True)
+        # 笔记模式：subtitle / optimized
+        self.note_mode = note_mode
 
     def export(self, note: Note, filename: str | None = None) -> Path:
         title = note.video_path.stem
@@ -69,10 +71,17 @@ class MarkdownExporter:
             out.append(f"![]({img_rel.as_posix()})")
             out.append("")
 
-        # 字幕行
-        for s in p.lines:
-            out.append(f"- {s.text}")
-        out.append("")
+        # 段落内容：按模式输出
+        if self.note_mode == "optimized" and p.optimized:
+            # 直接输出优化后的文本（可含 Markdown 标记）
+            for item in p.optimized:
+                out.append(item)
+                out.append("")
+        else:
+            # 字幕模式（逐行）
+            for s in p.lines:
+                out.append(f"- {s.text}")
+            out.append("")
 
         # 递归子段：层级 +1，编号前缀追加
         if p.children:

@@ -104,6 +104,15 @@ class NoteGenerator:
             - 不做摘要或改写；
             - 若没有子段落，children 必须返回空数组 []，不要返回空对象 {} 或 null；
             - 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。
+            - 同级段落按时间升序排列，互不重叠，顶层段落共同完整覆盖章节时间范围。
+
+            额外输出：optimized
+            - 为每个（含子层级）段落生成一个 optimized 字段：类型为字符串列表 List[str]；
+            - 将该段落内所有字幕行去除语气词后，添加合适标点，拼接成流畅的句子；
+            - 如果内容较长、可自然分段，请将 optimized 拆分为多条字符串；否则可只返回 1 条；
+            - 对句子中的重点知识点请使用 Markdown 进行标记（例如 **加粗**、`行内代码`、列表等）；
+            - 严禁在 optimized 中捏造未出现于该段落字幕中的事实；
+            - 保留术语与数字的准确性，保持时序逻辑。
             """
         ))
         content_lines = "\n".join(
@@ -230,7 +239,7 @@ class NoteGenerator:
     def _convert_paragraph(self, ps: ParagraphSchema) -> Paragraph:
         lines = [
             SubtitleSegment(line_no=l.line_no, start_sec=l.start_sec, end_sec=l.end_sec, text=l.text)
-            for l in ps.lines
+        for l in ps.lines
         ]
         children = [self._convert_paragraph(c) for c in ps.children] if ps.children else []
         return Paragraph(
@@ -239,6 +248,7 @@ class NoteGenerator:
             end_sec=ps.end_sec,
             lines=lines,
             children=children,
+            optimized=list(ps.optimized or []),
         )
 
     def _process_chapter(self, ci: int, cb: ChapterBoundary, meta: GenerationInputMeta, task_out_dir: Path) -> Chapter:
@@ -288,6 +298,15 @@ class NoteGenerator:
                     - 不做摘要或改写；
                     - 若没有子段落，children 必须返回空数组 []，不要返回空对象 {{}} 或 null；
                     - 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。
+                    - 同级段落按时间升序排列，互不重叠，顶层段落共同完整覆盖章节时间范围。
+
+                    额外输出：optimized
+                    - 为每个（含子层级）段落生成一个 optimized 字段：类型为字符串列表 List[str]；
+                    - 将该段落内所有字幕行去除语气词后，添加合适标点，拼接成流畅的句子；
+                    - 如果内容较长、可自然分段，请将 optimized 拆分为多条字符串；否则可只返回 1 条；
+                    - 对句子中的重点知识点请使用 Markdown 进行标记（例如 **加粗**、`行内代码`、列表等）；
+                    - 严禁在 optimized 中捏造未出现于该段落字幕中的事实；
+                    - 保留术语与数字的准确性，保持时序逻辑。
 
                     章节标题：{cb.title}
                     {content_lines}

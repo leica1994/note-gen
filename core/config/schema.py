@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -63,6 +63,18 @@ class ExportConfig(BaseModel):
         return v
 
 
+class NoteConfig(BaseModel):
+    """
+    笔记生成与展示配置。
+
+    - mode：
+      - "subtitle"：字幕模式（当前默认，逐行展示字幕行）
+      - "optimized"：AI 优化模式（段落内容经过优化合并并标注重点）
+    """
+
+    mode: Literal["subtitle", "optimized"] = Field(default="subtitle", description="笔记模式")
+
+
 class AppConfig(BaseModel):
     """
     应用总配置（支持 cache.json 记忆）。
@@ -72,3 +84,7 @@ class AppConfig(BaseModel):
     mm_llm: MultiModalConfig = Field(default_factory=MultiModalConfig)
     screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
+    note: NoteConfig = Field(default_factory=NoteConfig)
+
+
+    
