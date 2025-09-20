@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-
+from time import perf_counter
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtGui import QDesktopServices
 
@@ -76,7 +76,6 @@ class Worker(QtCore.QThread):
 
             self.progress_changed.emit(5)
             # 1) 加载字幕
-            from time import perf_counter
             t0 = perf_counter()
             sub_doc = load_subtitle(self.task.subtitle)
             logger.info("字幕加载完成", extra={

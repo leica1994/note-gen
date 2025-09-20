@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from langchain_core.messages import SystemMessage, HumanMessage
+from textwrap import dedent
 
 from core.config.schema import AppConfig
 from core.llms.mm_llm import MultiModalLLM
@@ -61,16 +62,22 @@ class NoteGenerator:
         return "\n".join(lines)
 
     def _prompt_for_chapters(self, meta: GenerationInputMeta) -> ChaptersSchema:
-        sys = SystemMessage(content=(
-            "你是一名专业的结构化编辑，任务是将有序字幕拆分为多个'章节'。\n"
-            "严格要求：\n"
-            "- 按字幕行号连续覆盖，禁止缺失或重叠；\n"
-            "- 每个章节返回：title, start_line_no, end_line_no；\n"
-            "- 章节按行号升序排列；\n"
-            "- 不做任何摘要或改写，不丢失行。\n"
+        sys = SystemMessage(content=dedent(
+            """
+            你是一名专业的结构化编辑，任务是将有序字幕拆分为多个'章节'。
+            严格要求：
+            - 按字幕行号连续覆盖，禁止缺失或重叠；
+            - 每个章节返回：title, start_line_no, end_line_no；
+            - 章节按行号升序排列；
+            - 不做任何摘要或改写，不丢失行。
+            """
         ))
-        human = HumanMessage(content=(
-            "以下是完整字幕（包含行号与时间戳）。请给出章节边界：\n\n" + self._render_all_subtitles(meta)
+        human = HumanMessage(content=dedent(
+            f"""
+            以下是完整字幕（包含行号与时间戳）。请给出章节边界：
+
+            {self._render_all_subtitles(meta)}
+            """
         ))
         t0 = perf_counter()
         # 单次调用，无需并发限流
@@ -86,25 +93,32 @@ class NoteGenerator:
         return [s for s in items if start_line <= s.line_no <= end_line]
 
     def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment], fix_note: str | None = None) -> ParagraphsSchema:
-        sys = SystemMessage(content=(
-            "你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。\n"
-            "严格要求：\n"
-            "- 覆盖所有提供的字幕行；\n"
-            "- 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；\n"
-            "- lines 数组逐条包含 line_no, start_sec, end_sec, text（保持原文）；\n"
-            "- 段落时间戳覆盖必须完整且不重叠，不得缺失；可以有子段落；\n"
-            "- 不做摘要或改写；\n"
-            "- 若没有子段落，children 必须返回空数组 []，不要返回空对象 {} 或 null；\n"
-            "- 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。\n"
+        sys = SystemMessage(content=dedent(
+            """
+            你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。
+            严格要求：
+            - 覆盖所有提供的字幕行；
+            - 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；
+            - lines 数组逐条包含 line_no, start_sec, end_sec, text（保持原文）；
+            - 段落时间戳覆盖必须完整且不重叠，不得缺失；可以有子段落；
+            - 不做摘要或改写；
+            - 若没有子段落，children 必须返回空数组 []，不要返回空对象 {} 或 null；
+            - 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。
+            """
         ))
-        content_lines = []
-        for s in segs:
-            content_lines.append(f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}")
-        extra = "\n\n注意：严格使用以上行号，确保完整覆盖且不重叠。"
-        if fix_note:
-            extra += f"\n\n修正提示：{fix_note}"
-        human = HumanMessage(content=(
-            f"章节标题：{chapter_title}\n请对以下字幕行进行结构化分段：\n\n" + "\n".join(content_lines) + extra
+        content_lines = "\n".join(
+            f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
+        )
+        fix_extra = f"\n\n修正提示：{fix_note}" if fix_note else ""
+        human = HumanMessage(content=dedent(
+            f"""
+            章节标题：{chapter_title}
+            请对以下字幕行进行结构化分段：
+
+            {content_lines}
+
+            注意：严格使用以上行号，确保完整覆盖且不重叠。{fix_extra}
+            """
         ))
         t0 = perf_counter()
         # 受文本 LLM 并发限制
@@ -196,10 +210,14 @@ class NoteGenerator:
 
     def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int) -> int:
         text = "\n".join(f"{s.line_no}: {s.text}" for s in para.lines)
-        instruction = (
-            "请从下方九宫格图中选择与该段落标题与内容最匹配的一张截图。\n"
-            "要求：避免过渡帧，画面清晰稳定；返回 index 为 1..9 的整数。\n"
-            f"段落标题：{para.title}\n段落内容：\n{text}"
+        instruction = dedent(
+            f"""
+            请从下方九宫格图中选择与该段落标题与内容最匹配的一张截图。
+            要求：避免过渡帧，画面清晰稳定；返回 index 为 1..9 的整数。
+            段落标题：{para.title}
+            段落内容：
+            {text}
+            """
         )
         # 受多模态 LLM 并发限制
         with self._mm_sem:
@@ -255,21 +273,26 @@ class NoteGenerator:
 
             # 证据：按尝试次数归档
             if self.cfg.export.save_prompts_and_raw:
-                content_lines = []
-                for s in segs:
-                    content_lines.append(f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}")
-                prompt_text = (
-                        "你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。\n"
-                        "严格要求：\n"
-                        "- 覆盖所有提供的字幕行；\n"
-                        "- 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；\n"
-                        "- lines 数组逐条包含 line_no, start_sec, end_sec, text（保持原文）；\n"
-                        "- 段落时间戳覆盖必须完整且不重叠，不得缺失；可以有子段落；\n"
-                        "- 不做摘要或改写；\n"
-                        "- 若没有子段落，children 必须返回空数组 []，不要返回空对象 {} 或 null；\n"
-                        "- 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。\n\n"
-                        f"章节标题：{cb.title}\n" + "\n".join(content_lines) + (
-                            f"\n\n修正提示：{fix_note}" if fix_note else "")
+                content_lines = "\n".join(
+                    f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
+                )
+                fix_extra = f"\n\n修正提示：{fix_note}" if fix_note else ""
+                prompt_text = dedent(
+                    f"""
+                    你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。
+                    严格要求：
+                    - 覆盖所有提供的字幕行；
+                    - 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；
+                    - lines 数组逐条包含 line_no, start_sec, end_sec, text（保持原文）；
+                    - 段落时间戳覆盖必须完整且不重叠，不得缺失；可以有子段落；
+                    - 不做摘要或改写；
+                    - 若没有子段落，children 必须返回空数组 []，不要返回空对象 {{}} 或 null；
+                    - 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。
+
+                    章节标题：{cb.title}
+                    {content_lines}
+                    {fix_extra}
+                    """
                 )
                 self.evidence.write_text(f"chapters/{ci}/attempt_{attempt}/paragraphs_prompt.txt", prompt_text)
                 self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/paragraphs_result.json", pgs.model_dump())
