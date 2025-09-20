@@ -1,31 +1,68 @@
-# note-gen
+# note-gen — 基于字幕与视频的 AI 笔记生成器（PySide6 GUI）
 
-基于字幕与视频生成分层 AI 笔记（含自动截帧与多模态优选）。
+note-gen 是一个本地运行的 AI 辅助笔记生成工具：读取视频与同名字幕，按“分章 → 分段 → 智能选图 → 导出 Markdown”的流程，生成结构化、适合知识管理的学习笔记。项目内置参数记忆与证据留存，方便审计与复现。
 
-## 功能概述
-- 解析 ASS / VTT / SRT 字幕为统一结构
-- 调用文本 LLM 将“完整字幕内容”分章、分段（不做摘要、不丢内容）
-- 为每个段落等距生成 9 张低清截图拼九宫格，由多模态 LLM 选择最佳帧
-- 对最佳帧按相同时间戳重拍高清图
-- 导出包含所有原字幕内容与截图的 Markdown
-- 提供 PySide6 GUI：文件选择、参数配置（含通用 LLM 与多模态 LLM）、任务队列、参数记忆（cache.json）
-
-## 运行前置
-- Python 由 uv 管理（本项目不依赖系统 `python` 命令）
-- 建议已安装 `ffmpeg`（用于高质量与高性能截图）
-
-## 快速开始
-1. 安装依赖：`uv sync`
-2. 启动 GUI：`uv run python run_gui.py`
+## 核心能力
+- 字幕解析：支持 `.srt/.ass/.ssa/.vtt`，与视频同名自动配对。
+- 结构化生成：LLM 识别章节与段落，保留时间轴与字幕行，支持“字幕模式/AI 优化模式”。
+- 智能选图：等距截帧生成九宫格，调用多模态 LLM 选择最代表内容的截图，并重拍高清帧。
+- 导出与留存：导出 Markdown；保存提示词、原始返回与过程证据到 `evidence/`；日志脱敏。
 
 ## 目录结构
-- `core/` 核心代码（低耦合高内聚，面向对象）
-- `evidence/` 证据与日志归档（可审计）
-- `outputs/` 生成的 Markdown 与截图文件
+```
+main.py                # 应用入口（启动 GUI）
+core/gui/app.py        # GUI 主程序（左右布局 + 参数记忆）
+core/gui/assets/       # 图标与界面资源
+core/config/           # 配置模型与 cache（cache.json）
+core/subtitles/        # 字幕加载与模型
+core/note/             # 笔记生成（分章/分段/选图）
+core/screenshot/       # ffmpeg 截图与九宫格
+core/export/           # Markdown 导出
+core/utils/            # 证据、日志、哈希、脱敏、重试
+```
 
-## 失败与重试
-- 外部调用（LLM/截图）失败按策略最多重试 3 次；达到上限则快速失败并记录证据
+## 环境与安装（uv 管理）
+- 依赖：Python 3.13+、FFmpeg（命令 `ffmpeg` 可用，或在 GUI 中调整路径）。
+- 安装与同步：`uv sync`
+- 启动 GUI：`uv run main.py`
+- 以模块方式运行（可选）：`uv run -m core.gui.app`
+- 新增依赖：`uv add <包名>`（自动更新 `uv.lock`）
 
-## 版权
-- 本项目代码无额外版权头，遵循仓库整体策略。
+## GUI 使用说明（新版布局）
+- 左右布局：右侧“任务列表”；左侧上下分为“选择与候选列表”“参数配置”。
+- 左上 – 选择与候选列表：
+  - 选择模式：
+    - 文件模式：选择一个视频，自动匹配同名字幕。
+    - 文件夹模式：扫描目录，查找同名“视频-字幕”对（当前不递归）。
+  - 候选表：列为【选择/视频/字幕/目录】，支持复选框、多选；提供“全选/全不选/添加到右侧任务列表”。
+- 左下 – 参数配置（标签页）：
+  - AI 参数配置：文本 LLM 与多模态 LLM 的 `base_url/api_key/model/并发`，支持“连通性测试”。
+  - 笔记参数配置：`note.mode`（`subtitle`/`optimized`）。所有参数变更自动写入 `cache.json`。
+- 右侧 – 任务列表：
+  - 列为【任务ID/视频/字幕/状态/进度%/错误】；选中后点击“开始处理选中任务”。
+
+## 处理流程与产物
+1) 加载字幕：`core/subtitles/loader.py`
+2) 生成笔记：`core/note/generator.py`
+   - 分章/分段：`TextLLM` 结构化输出（见 `core/llms/`）。
+   - 选图：`core/screenshot/` 生成九宫格，`MultiModalLLM` 选择，随后高清重拍。
+3) 导出 Markdown：`core/export/markdown.py`（文件名：`outputs/<task_id>/<task_id>.md`）
+4) 证据与日志：
+   - `evidence/<task_id>/` 保存提示词、原始返回与中间结果（`EvidenceWriter`）。
+   - `logs/` 记录任务全流程（敏感信息经 `mask_secret` 脱敏）。
+
+## 参数要点（GUI 可视化配置）
+- 文本 LLM/多模态 LLM：`base_url`、`api_key`、`model`、`concurrency`、`timeout` 等。
+- 截图：`ffmpeg_path`、`grid_columns/rows`、`hi_quality`、`max_workers`。
+- 导出：`outputs_root`、`evidence_root`、`logs_root`、`save_prompts_and_raw`。
+- 笔记模式：`note.mode = subtitle | optimized`。
+
+## 常见问题
+- 无法截帧：确认已安装 FFmpeg 或修改 GUI 中的 `ffmpeg_path`。
+- LLM 连通性报错：在 GUI “AI 参数配置”中使用“测试连通性”自检；检查 `base_url/api_key/model`。
+- 未匹配到字幕：确保字幕与视频同名，扩展名为 `.srt/.ass/.ssa/.vtt`。
+
+## 贡献与说明
+- 开发规范与提交要求见 `AGENTS.md`。
+- 建议使用 Conventional Commits；GUI 改动注意“最小变更边界”，并在 `evidence/` 留存关键证据。
 
