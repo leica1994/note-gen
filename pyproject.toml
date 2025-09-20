@@ -1,0 +1,17 @@
+[project]
+name = "note-gen"
+version = "0.1.0"
+description = "基于字幕与视频生成分层AI笔记（含自动截帧与多模态优选）"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.6",
+    "langchain>=0.2",
+    "langchain-openai>=0.1",
+    "pysubs2>=1.6",
+    "webvtt-py>=0.4",
+    "Pillow>=10",
+    "PySide6>=6.7",
+]
+
+[tool.uv]
+managed = true
