@@ -1,5 +1,4 @@
-from core.gui.main import main
+from core.gui.app import main
 
 if __name__ == "__main__":
     main()
-
