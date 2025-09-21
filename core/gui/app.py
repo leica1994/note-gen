@@ -192,6 +192,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.radio_mode_file.setChecked(True)
         mode_row.addWidget(self.radio_mode_file)
         mode_row.addWidget(self.radio_mode_folder)
+        # 文件夹模式右侧内联选项：递归模式 / 排除已生成（仅在文件夹模式时可见）
+        self.chk_recursive = QtWidgets.QCheckBox("递归模式")
+        self.chk_exclude_existing = QtWidgets.QCheckBox("排除已生成")
+        try:
+            self.chk_recursive.setIcon(self._icon("tree"))
+            self.chk_exclude_existing.setIcon(self._icon("filter"))
+        except Exception:
+            pass
+        mode_row.addSpacing(12)
+        mode_row.addWidget(self.chk_recursive)
+        mode_row.addWidget(self.chk_exclude_existing)
         mode_row.addStretch(1)
         top_left_layout.addLayout(mode_row)
 
@@ -402,9 +413,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.radio_mode_file.isChecked():
             self.btn_pick_input.setText("选择视频文件")
             self.btn_pick_input.setIcon(self._icon("file"))
+            # 文件模式下，隐藏并禁用文件夹相关选项（避免误触）
+            if getattr(self, "chk_recursive", None):
+                self.chk_recursive.setEnabled(False)
+                self.chk_recursive.setVisible(False)
+            if getattr(self, "chk_exclude_existing", None):
+                self.chk_exclude_existing.setEnabled(False)
+                self.chk_exclude_existing.setVisible(False)
         else:
             self.btn_pick_input.setText("选择文件夹")
             self.btn_pick_input.setIcon(self._icon("folder"))
+            # 文件夹模式下，显示并启用选项
+            if getattr(self, "chk_recursive", None):
+                self.chk_recursive.setEnabled(True)
+                self.chk_recursive.setVisible(True)
+            if getattr(self, "chk_exclude_existing", None):
+                self.chk_exclude_existing.setEnabled(True)
+                self.chk_exclude_existing.setVisible(True)
 
     def _apply_default_icons(self):
         """为界面中的主要按钮设置默认图标（一次性）。
@@ -447,7 +472,15 @@ class MainWindow(QtWidgets.QMainWindow):
             folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择包含视频与字幕的文件夹", "")
             if not folder:
                 return
-            pairs = self._scan_folder_for_pairs(Path(folder))
+            # 读取文件夹模式选项
+            recursive = False
+            exclude_existing = False
+            try:
+                recursive = bool(self.chk_recursive.isChecked())
+                exclude_existing = bool(self.chk_exclude_existing.isChecked())
+            except Exception:
+                pass
+            pairs = self._scan_folder_for_pairs(Path(folder), recursive=recursive, exclude_existing=exclude_existing)
             if not pairs:
                 QtWidgets.QMessageBox.information(self, "没有匹配", "未在该目录下找到同名的视频-字幕对")
                 return
@@ -544,29 +577,62 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         return None
 
-    def _scan_folder_for_pairs(self, folder: Path) -> list[tuple[Path, Path]]:
-        """扫描文件夹，查找同名“视频-字幕”对（仅当前目录，最小变更）。"""
+    def _scan_folder_for_pairs(self, folder: Path, *, recursive: bool = False,
+                               exclude_existing: bool = False) -> list[tuple[Path, Path]]:
+        """扫描文件夹，查找同名“视频-字幕”对。
+
+        - 当 recursive=True 时，递归遍历子目录：在每个视频所在目录按同名规则匹配字幕；
+        - 当 exclude_existing=True 时，若 Markdown 根目录已存在“视频名.md”，则跳过该视频；
+        - Markdown 根目录：优先使用配置的 `note.note_dir`，否则使用 `export.outputs_root`。
+        """
         video_exts = {".mp4", ".mkv", ".mov", ".avi", ".wmv"}
-        sub_exts = {".srt", ".ass", ".ssa", ".vtt"}
-        videos: dict[str, Path] = {}
-        subs: dict[str, Path] = {}
-        try:
-            for p in folder.iterdir():
-                if not p.is_file():
-                    continue
-                suf = p.suffix.lower()
-                if suf in video_exts:
-                    videos[p.stem] = p
-                elif suf in sub_exts:
-                    subs[p.stem] = p
-        except Exception:
-            return []
         pairs: list[tuple[Path, Path]] = []
-        for stem, v in videos.items():
-            s = subs.get(stem)
-            if s:
-                pairs.append((v, s))
-        return pairs
+
+        # 计算 Markdown 根目录（与 Worker 保持一致）
+        try:
+            md_root = Path(getattr(getattr(self.cfg, 'note', None), 'note_dir', None) or self.cfg.export.outputs_root)
+        except Exception:
+            md_root = Path(self.cfg.export.outputs_root)
+
+        def should_exclude(video: Path) -> bool:
+            if not exclude_existing:
+                return False
+            md_file = md_root / f"{video.stem}.md"
+            try:
+                return md_file.exists()
+            except Exception:
+                return False
+
+        if recursive:
+            # 递归模式：遍历目录下所有视频文件，并在其所在目录匹配字幕
+            try:
+                for p in folder.rglob('*'):
+                    if p.is_file() and p.suffix.lower() in video_exts:
+                        v = p
+                        if should_exclude(v):
+                            continue
+                        s = self._auto_match_subtitle(v)
+                        if s:
+                            pairs.append((v, s))
+            except Exception:
+                return pairs
+            return pairs
+        else:
+            # 非递归：仅当前目录，按同名匹配
+            try:
+                for p in folder.iterdir():
+                    if not p.is_file():
+                        continue
+                    if p.suffix.lower() in video_exts:
+                        v = p
+                        if should_exclude(v):
+                            continue
+                        s = self._auto_match_subtitle(v)
+                        if s:
+                            pairs.append((v, s))
+            except Exception:
+                return pairs
+            return pairs
 
     # 右侧交互
     def _refresh_table(self):
