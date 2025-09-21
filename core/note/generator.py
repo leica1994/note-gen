@@ -534,7 +534,6 @@ class NoteGenerator:
                     )
                     try:
                         fix_report = self._auto_fix_paragraph_lines(segs, pgs.paragraphs, issue)
-                        self._validate_time_coverage(segs, pgs.paragraphs)
                         self.logger.info(
                             "自动修正完成",
                             extra={
