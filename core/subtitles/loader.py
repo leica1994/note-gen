@@ -24,7 +24,6 @@ def load_subtitle(path: str | Path) -> SubtitleDocument:
     p = Path(path)
     ext = p.suffix.lower()
     items: List[SubtitleSegment] = []
-    fmt = ext.lstrip(".")
 
     if ext in {".srt", ".ass", ".ssa"}:
         subs = pysubs2.load(str(p))
