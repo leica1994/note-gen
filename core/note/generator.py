@@ -20,6 +20,7 @@ from core.note.models import (
     Note,
     Paragraph,
     ParagraphImage,
+    ParagraphLine,
     ParagraphSchema,
     ParagraphsSchema,
 )
@@ -225,6 +226,148 @@ class NoteGenerator:
             "boundary_mismatch": out_of_bounds,
         }
 
+    def _auto_fix_paragraph_lines(
+        self,
+        segs: List[SubtitleSegment],
+        paragraphs: List[ParagraphSchema],
+        issue: Dict[str, Any] | None = None,
+    ) -> Dict[str, int]:
+        """在重试耗尽后自动修正段落的字幕行集合，使其与输入字幕一致。"""
+        line_map: Dict[int, SubtitleSegment] = {s.line_no: s for s in segs}
+        expected_ids: Set[int] = set(line_map.keys())
+        assigned: Set[int] = set()
+        stats: Dict[str, int] = {
+            "removed_duplicate": 0,
+            "removed_extra": 0,
+            "filled_missing": 0,
+            "created_paragraphs": 0,
+            "promoted_children": 0,
+            "removed_empty": 0,
+            "final_missing": 0,
+            "final_extra": 0,
+        }
+        tolerance = 0.3
+
+        def iter_nodes(nodes: List[ParagraphSchema]) -> Iterable[ParagraphSchema]:
+            for node in nodes:
+                yield node
+                if node.children:
+                    yield from iter_nodes(node.children)
+
+        def collect_ids(nodes: List[ParagraphSchema]) -> Iterable[int]:
+            for node in nodes:
+                for line in node.lines:
+                    yield line.line_no
+                if node.children:
+                    yield from collect_ids(node.children)
+
+        def deduplicate(nodes: List[ParagraphSchema]) -> None:
+            for node in nodes:
+                new_lines: List[ParagraphLine] = []
+                for line in node.lines:
+                    seg = line_map.get(line.line_no)
+                    if seg is None:
+                        stats["removed_extra"] += 1
+                        continue
+                    if line.line_no in assigned:
+                        stats["removed_duplicate"] += 1
+                        continue
+                    assigned.add(line.line_no)
+                    new_lines.append(
+                        ParagraphLine(
+                            line_no=seg.line_no,
+                            start_sec=seg.start_sec,
+                            end_sec=seg.end_sec,
+                            text=seg.text,
+                        )
+                    )
+                node.lines = new_lines
+                if node.children:
+                    deduplicate(node.children)
+
+        deduplicate(paragraphs)
+
+        missing_ids = sorted(expected_ids - assigned)
+        for line_no in missing_ids:
+            seg = line_map[line_no]
+
+            def pick_target() -> ParagraphSchema | None:
+                best: tuple[float, ParagraphSchema] | None = None
+                for node in iter_nodes(paragraphs):
+                    if seg.start_sec >= node.start_sec - tolerance and seg.end_sec <= node.end_sec + tolerance:
+                        gap = abs(seg.start_sec - node.start_sec) + abs(seg.end_sec - node.end_sec)
+                        if best is None or gap < best[0]:
+                            best = (gap, node)
+                if best is not None:
+                    return best[1]
+
+                best = None
+                for node in iter_nodes(paragraphs):
+                    if node.lines:
+                        min_line = node.lines[0].line_no
+                        max_line = node.lines[-1].line_no
+                        if min_line <= seg.line_no <= max_line:
+                            return node
+                        gap = min(abs(seg.line_no - min_line), abs(seg.line_no - max_line))
+                    else:
+                        gap = abs(seg.start_sec - node.start_sec)
+                    if best is None or gap < best[0]:
+                        best = (gap, node)
+                return best[1] if best else None
+
+            target = pick_target()
+            new_line = ParagraphLine(
+                line_no=seg.line_no,
+                start_sec=seg.start_sec,
+                end_sec=seg.end_sec,
+                text=seg.text,
+            )
+            stats["filled_missing"] += 1
+            assigned.add(seg.line_no)
+            if target is not None:
+                target.lines.append(new_line)
+            else:
+                paragraphs.append(
+                    ParagraphSchema(
+                        title=f"自动补齐 {seg.line_no}",
+                        start_sec=seg.start_sec,
+                        end_sec=seg.end_sec,
+                        lines=[new_line],
+                    )
+                )
+                stats["created_paragraphs"] += 1
+
+        def finalize(nodes: List[ParagraphSchema]) -> List[ParagraphSchema]:
+            result: List[ParagraphSchema] = []
+            for node in nodes:
+                node.children = finalize(node.children)
+                if node.lines:
+                    node.lines.sort(key=lambda x: x.line_no)
+                    node.start_sec = min(line.start_sec for line in node.lines)
+                    node.end_sec = max(line.end_sec for line in node.lines)
+                    result.append(node)
+                elif node.children:
+                    result.extend(node.children)
+                    node.children = []
+                    stats["promoted_children"] += 1
+                else:
+                    stats["removed_empty"] += 1
+            return result
+
+        paragraphs[:] = finalize(paragraphs)
+
+        final_ids = set(collect_ids(paragraphs))
+        stats["final_missing"] = len(expected_ids - final_ids)
+        stats["final_extra"] = len(final_ids - expected_ids)
+
+        if issue is not None:
+            # 保留原始异常信息，协助定位LLM输出习惯性问题
+            stats.setdefault("issue_missing", len(issue.get("missing", [])))
+            stats.setdefault("issue_duplicate", len(issue.get("duplicate", [])))
+            stats.setdefault("issue_extra", len(issue.get("extra", [])))
+
+        return stats
+
     def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int) -> int:
         text = "\n".join(f"{s.line_no}: {s.text}" for s in para.lines)
         instruction = dedent(
@@ -285,7 +428,7 @@ class NoteGenerator:
                 if not last_issue.get("coverage_ok", True):
                     parts.append("时间未完整覆盖章节范围")
                 if last_issue.get("boundary_mismatch"):
-                    parts.append("段落边界必须等于该段落所有行的最小开始与最大结束；禁止修改任一行的时间戳")
+                    parts.append("段落边界必须等于该段落所有行的最小开始与最大结束；禁止修改任何行的时间戳")
                 fix_note = "；".join(parts)
 
             pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note)
@@ -302,7 +445,7 @@ class NoteGenerator:
                     严格要求：
                     - 覆盖所有提供的字幕行；
                     - 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；
-                    - lines 数组逐条包含 line_no, start_sec, end_sec, text（保持原文）；
+                    - lines 数组逐条包含 line_no, start_sec, end_sec, text（保留原文）；
                     - 段落时间戳覆盖必须完整且不重叠，不得缺失；可以有子段落；
                     - 不做摘要或改写；
                     - 若没有子段落，children 必须返回空数组 []，不要返回空对象 {{}} 或 null；
@@ -314,7 +457,7 @@ class NoteGenerator:
                     - 将该段落内所有字幕行去除语气词后，添加合适标点，拼接成流畅的句子；
                     - 如果内容较长、可自然分段，请将 optimized 拆分为多条字符串；否则可只返回 1 条；
                     - 对句子中的重点知识点请使用 Markdown 进行标记（例如 **加粗**、`行内代码`、列表等）；
-                    - 严禁在 optimized 中捏造未出现于该段落字幕中的事实；
+                    - 严禁在 optimized 中捏造未出现在该段落字幕中的事实；
                     - 保留术语与数字的准确性，保持时序逻辑。
 
                     章节标题：{cb.title}
@@ -334,7 +477,28 @@ class NoteGenerator:
                 last_issue = issue
                 self.logger.info("章节校验失败，准备重试", extra={"chapter_index": ci, "attempt": attempt, **issue})
                 if attempt >= max_attempts:
-                    raise ValueError("分段行号集合与输入集合不一致，存在缺失或重复")
+                    self.logger.warning(
+                        "章节校验连续失败，触发自动修正",
+                        extra={"chapter_index": ci, "attempt": attempt, **issue},
+                    )
+                    try:
+                        fix_report = self._auto_fix_paragraph_lines(segs, pgs.paragraphs, issue)
+                        self._validate_time_coverage(segs, pgs.paragraphs)
+                        self.logger.info(
+                            "自动修正完成",
+                            extra={
+                                "chapter_index": ci,
+                                "attempt": attempt,
+                                "auto_fix": fix_report,
+                            },
+                        )
+                        break
+                    except Exception as fix_error:
+                        self.logger.error(
+                            "自动修正失败",
+                            extra={"chapter_index": ci, "attempt": attempt, "error": str(fix_error)},
+                        )
+                        raise ValueError("分段行号集合与输入集合不一致，存在缺失或重复") from fix_error
 
         assert pgs is not None
 
