@@ -43,6 +43,9 @@ class ScreenshotConfig(BaseModel):
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
     include_endpoints: bool = Field(default=True, description="九宫格是否包含区间两端点")
     max_workers: int = Field(default=1, ge=1, le=64, description="截图/段落处理并发数（固定串行建议设为1）")
+    # 硬件加速（可选）：例如 cuda/qsv/dxva2/d3d11va/vaapi 等；默认不启用
+    hwaccel: Optional[str] = Field(default=None, description="ffmpeg -hwaccel 参数（如 cuda/qsv/dxva2/vaapi），默认 None 关闭")
+    hwaccel_device: Optional[str] = Field(default=None, description="ffmpeg -hwaccel_device（如 cuda:0 或 /dev/dri/renderD128），默认 None")
 
     @property
     def grid_count(self) -> int:

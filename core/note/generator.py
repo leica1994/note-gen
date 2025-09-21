@@ -51,7 +51,10 @@ class NoteGenerator:
         # 并发与限流：
         self._text_sem = threading.Semaphore(max(1, self.cfg.text_llm.concurrency))
         self._mm_sem = threading.Semaphore(max(1, self.cfg.mm_llm.concurrency))
-        # 全局截图串行：确保任意时刻仅有一个截图过程（低清与高清）在运行
+        # 全局截图并发：
+        # - 九宫格缩略图：受全局信号量限制（允许若干并发，降低排队放大）
+        # - 高清重拍：保持全局串行，避免 I/O 抖动并保证稳定性
+        self._thumb_sem = threading.Semaphore(max(1, self.cfg.screenshot.max_workers))
         self._shot_sem = threading.Semaphore(1)
 
     def _render_all_subtitles(self, meta: GenerationInputMeta) -> str:
@@ -344,9 +347,26 @@ class NoteGenerator:
             thumbs_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "thumbs"
             grid_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "grid.jpg"
             t_s = perf_counter()
-            with self._shot_sem:
-                thumbs = self.screenshotter.capture_thumbs(Path(meta.video_path), timestamps, thumbs_dir)
-                self.screenshotter.compose_grid(thumbs, grid_path)
+            # 优先使用“一次 ffmpeg 产出九宫格”（失败时回退到旧方案）
+            try:
+                with self._thumb_sem:
+                    self.screenshotter.compose_grid_one_shot(
+                        Path(meta.video_path), timestamps, grid_path,
+                        cols=self.cfg.screenshot.grid_columns,
+                        rows=self.cfg.screenshot.grid_rows,
+                        width=self.cfg.screenshot.low_width,
+                        height=self.cfg.screenshot.low_height,
+                    )
+            except Exception as e:
+                # 回退方案：逐帧缩略图 + PIL 拼图
+                self.logger.info("一把流九宫格失败，将回退逐帧", extra={
+                    "chapter_index": ci,
+                    "para_index": pi,
+                    "error": str(e),
+                })
+                with self._thumb_sem:
+                    thumbs = self.screenshotter.capture_thumbs(Path(meta.video_path), timestamps, thumbs_dir)
+                    self.screenshotter.compose_grid(thumbs, grid_path)
             self.logger.info("生成九宫格完成", extra={
                 "chapter_index": ci,
                 "para_index": pi,
