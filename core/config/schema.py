@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class LLMConfig(BaseModel):
@@ -82,12 +82,25 @@ class NoteConfig(BaseModel):
     """
 
     mode: Literal["subtitle", "optimized"] = Field(default="subtitle", description="笔记模式")
-    # 新增：笔记/截图目录配置（作为输出根目录的优先覆盖）。
-    # 说明：
-    # - input_dir：若设置，则 Markdown 输出写入该目录；否则回退至 export.outputs_root。
-    # - screenshot_input_dir：若设置，则截图输出写入该目录下 <task_id> 子目录；否则回退至 export.outputs_root/<task_id>。
-    input_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
-    screenshot_input_dir: Optional[Path] = Field(default=None, description="截图目录（截图输出根目录优先覆盖）")
+    # 目录配置：
+    # - note_dir：若设置，则 Markdown 输出写入该目录；否则回退至 export.outputs_root。
+    # - screenshot_dir：若设置，则高清截图输出写入该目录；否则回退至 export.outputs_root/<task_id>。
+    note_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
+    screenshot_dir: Optional[Path] = Field(default=None, description="截图目录（高清截图输出优先覆盖）")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, data):
+        """向后兼容旧字段：input_dir → note_dir，screenshot_input_dir → screenshot_dir。"""
+        try:
+            if isinstance(data, dict):
+                if "input_dir" in data and "note_dir" not in data:
+                    data["note_dir"] = data.get("input_dir")
+                if "screenshot_input_dir" in data and "screenshot_dir" not in data:
+                    data["screenshot_dir"] = data.get("screenshot_input_dir")
+        except Exception:
+            pass
+        return data
 
 
 class AppConfig(BaseModel):

@@ -615,11 +615,11 @@ class NoteGenerator:
             safe_video = _sanitize_filename(video_stem)
             hi_name = f"{safe_video}_{safe_title}_{ts_str}.jpg"
             # 高清图输出位置：
-            # - 若 GUI 配置了截图目录（note.screenshot_input_dir），则写入该目录；
+            # - 若 GUI 配置了截图目录（note.screenshot_dir），则写入该目录；
             # - 否则仍写入任务输出目录（base_dir）。
             hi_root = None
             try:
-                hi_root = getattr(getattr(self.cfg, 'note', None), 'screenshot_input_dir', None)
+                hi_root = getattr(getattr(self.cfg, 'note', None), 'screenshot_dir', None)
             except Exception:
                 hi_root = None
             if hi_root:

@@ -57,16 +57,16 @@ class Worker(QtCore.QThread):
                 "subtitle": str(self.task.subtitle),
             })
             # 记录输出目录位置（便于审计）
-            # 计算 Markdown 根目录（若配置了 note.input_dir 则优先）
+            # 计算 Markdown 根目录（若配置了 note.note_dir 则优先）
             try:
-                md_root = Path(getattr(getattr(self.cfg, 'note', None), 'input_dir', None) or self.cfg.export.outputs_root)
+                md_root = Path(getattr(getattr(self.cfg, 'note', None), 'note_dir', None) or self.cfg.export.outputs_root)
             except Exception:
                 md_root = Path(self.cfg.export.outputs_root)
             try:
                 logger.info("输出目录", extra={
                     "markdown_root": str(md_root),
                     "screenshots_task_dir": str(out_dir),
-                    "hi_image_override_dir": str(getattr(getattr(self.cfg, 'note', None), 'screenshot_input_dir', '') or ''),
+                    "hi_image_override_dir": str(getattr(getattr(self.cfg, 'note', None), 'screenshot_dir', '') or ''),
                 })
             except Exception:
                 pass
@@ -282,35 +282,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_note_mode.setCurrentIndex(idx)
         note_layout.addRow("笔记模式", self.combo_note_mode)
 
-        # 新增：笔记输入目录（仅存储配置，后续可用于导入）
-        self.edit_note_input_dir = QtWidgets.QLineEdit()
+        # 新增：笔记目录（用于 Markdown 输出根目录）
+        self.edit_note_dir = QtWidgets.QLineEdit()
         try:
-            self.edit_note_input_dir.setText(str(getattr(self.cfg.note, 'input_dir', '') or ''))
+            self.edit_note_dir.setText(str(getattr(self.cfg.note, 'note_dir', '') or ''))
         except Exception:
-            self.edit_note_input_dir.setText("")
-        self.btn_pick_note_input_dir = QtWidgets.QPushButton("选择目录")
+            self.edit_note_dir.setText("")
+        self.btn_pick_note_dir = QtWidgets.QPushButton("选择目录")
         row_note_input = QtWidgets.QWidget()
         row_note_input_layout = QtWidgets.QHBoxLayout(row_note_input)
         row_note_input_layout.setContentsMargins(0, 0, 0, 0)
         row_note_input_layout.setSpacing(6)
-        row_note_input_layout.addWidget(self.edit_note_input_dir)
-        row_note_input_layout.addWidget(self.btn_pick_note_input_dir)
-        note_layout.addRow("笔记输入目录", row_note_input)
+        row_note_input_layout.addWidget(self.edit_note_dir)
+        row_note_input_layout.addWidget(self.btn_pick_note_dir)
+        note_layout.addRow("笔记目录", row_note_input)
 
-        # 新增：截图输入地址（目录，当前版本仅存储配置）
-        self.edit_screenshot_input_dir = QtWidgets.QLineEdit()
+        # 新增：截图目录（用于高清重拍输出目录）
+        self.edit_screenshot_dir = QtWidgets.QLineEdit()
         try:
-            self.edit_screenshot_input_dir.setText(str(getattr(self.cfg.note, 'screenshot_input_dir', '') or ''))
+            self.edit_screenshot_dir.setText(str(getattr(self.cfg.note, 'screenshot_dir', '') or ''))
         except Exception:
-            self.edit_screenshot_input_dir.setText("")
-        self.btn_pick_screenshot_input_dir = QtWidgets.QPushButton("选择目录")
+            self.edit_screenshot_dir.setText("")
+        self.btn_pick_screenshot_dir = QtWidgets.QPushButton("选择目录")
         row_shot_input = QtWidgets.QWidget()
         row_shot_input_layout = QtWidgets.QHBoxLayout(row_shot_input)
         row_shot_input_layout.setContentsMargins(0, 0, 0, 0)
         row_shot_input_layout.setSpacing(6)
-        row_shot_input_layout.addWidget(self.edit_screenshot_input_dir)
-        row_shot_input_layout.addWidget(self.btn_pick_screenshot_input_dir)
-        note_layout.addRow("截图输入地址", row_shot_input)
+        row_shot_input_layout.addWidget(self.edit_screenshot_dir)
+        row_shot_input_layout.addWidget(self.btn_pick_screenshot_dir)
+        note_layout.addRow("截图目录", row_shot_input)
         bottom_tabs.addTab(tab_note, "笔记参数配置")
 
         # 左侧组装
@@ -366,11 +366,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_mm_conc.valueChanged.connect(self._schedule_save_config)
         # 笔记模式变更
         self.combo_note_mode.currentIndexChanged.connect(self._schedule_save_config)
-        # 新增：笔记/截图输入目录变更与选择
-        self.edit_note_input_dir.textChanged.connect(self._schedule_save_config)
-        self.edit_screenshot_input_dir.textChanged.connect(self._schedule_save_config)
-        self.btn_pick_note_input_dir.clicked.connect(self._pick_note_input_dir)
-        self.btn_pick_screenshot_input_dir.clicked.connect(self._pick_screenshot_input_dir)
+        # 新增：笔记/截图目录变更与选择
+        self.edit_note_dir.textChanged.connect(self._schedule_save_config)
+        self.edit_screenshot_dir.textChanged.connect(self._schedule_save_config)
+        self.btn_pick_note_dir.clicked.connect(self._pick_note_dir)
+        self.btn_pick_screenshot_dir.clicked.connect(self._pick_screenshot_dir)
+        # 右侧任务表：双击打开输出目录（笔记目录优先）
+        try:
+            self.table.cellDoubleClicked.connect(self._on_table_double_click)
+        except Exception:
+            pass
 
     # 左侧交互
     def _update_pick_button_text(self):
@@ -652,33 +657,48 @@ class MainWindow(QtWidgets.QMainWindow):
                 from core.config.schema import NoteConfig
                 self.cfg.note = NoteConfig()
             self.cfg.note.mode = mode
-            # 保存笔记输入目录与截图输入地址（目录）
-            txt_note_dir = (self.edit_note_input_dir.text() or '').strip()
-            self.cfg.note.input_dir = Path(txt_note_dir) if txt_note_dir else None
-            txt_shot_dir = (self.edit_screenshot_input_dir.text() or '').strip()
-            self.cfg.note.screenshot_input_dir = Path(txt_shot_dir) if txt_shot_dir else None
+            # 保存笔记目录与截图目录
+            txt_note_dir = (self.edit_note_dir.text() or '').strip()
+            self.cfg.note.note_dir = Path(txt_note_dir) if txt_note_dir else None
+            txt_shot_dir = (self.edit_screenshot_dir.text() or '').strip()
+            self.cfg.note.screenshot_dir = Path(txt_shot_dir) if txt_shot_dir else None
             ConfigCache().save(self.cfg)
         except Exception:
             # 静默失败，不打断用户操作；关闭时会再尝试
             pass
 
-    def _pick_note_input_dir(self):
-        """选择笔记输入目录（仅存储配置，当前版本不做导入）。"""
+    def _pick_note_dir(self):
+        """选择笔记目录（Markdown 输出根目录）。"""
         try:
-            init_dir = self.edit_note_input_dir.text().strip() or str(Path.cwd())
-            d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择笔记输入目录", init_dir)
+            init_dir = self.edit_note_dir.text().strip() or str(Path.cwd())
+            d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择笔记目录", init_dir)
             if d:
-                self.edit_note_input_dir.setText(d)
+                self.edit_note_dir.setText(d)
         except Exception:
             pass
 
-    def _pick_screenshot_input_dir(self):
-        """选择截图输入地址（目录，当前版本仅存储配置）。"""
+    def _on_table_double_click(self, row: int, column: int):  # noqa: ARG002
+        """双击表格行：打开输出目录（笔记目录优先）。"""
+        self._open_output_dir()
+
+    def _open_output_dir(self):
+        """打开输出目录：优先“笔记目录”，否则 `outputs/` 根目录。"""
         try:
-            init_dir = self.edit_screenshot_input_dir.text().strip() or str(Path.cwd())
-            d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择截图输入地址", init_dir)
+            note_dir = getattr(getattr(self.cfg, 'note', None), 'note_dir', None)
+            base = Path(note_dir) if note_dir else Path(self.cfg.export.outputs_root)
+            base.mkdir(parents=True, exist_ok=True)
+            url = QtCore.QUrl.fromLocalFile(str(base))
+            QtGui.QDesktopServices.openUrl(url)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "打开目录失败", str(e))
+
+    def _pick_screenshot_dir(self):
+        """选择截图目录（高清重拍输出目录）。"""
+        try:
+            init_dir = self.edit_screenshot_dir.text().strip() or str(Path.cwd())
+            d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择截图目录", init_dir)
             if d:
-                self.edit_screenshot_input_dir.setText(d)
+                self.edit_screenshot_dir.setText(d)
         except Exception:
             pass
 
