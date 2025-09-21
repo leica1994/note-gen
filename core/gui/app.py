@@ -224,7 +224,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.edit_model = QtWidgets.QLineEdit(self.cfg.text_llm.model)
         self.spin_text_conc = QtWidgets.QSpinBox()
-        self.spin_text_conc.setRange(1, 64)
+        # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
+        self.spin_text_conc.setRange(1, 2147483647)
         self.spin_text_conc.setValue(self.cfg.text_llm.concurrency)
         self.btn_test_llm = QtWidgets.QPushButton("测试文本LLM连通性")
 
@@ -233,7 +234,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_mm_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.edit_mm_model = QtWidgets.QLineEdit(self.cfg.mm_llm.model)
         self.spin_mm_conc = QtWidgets.QSpinBox()
-        self.spin_mm_conc.setRange(1, 64)
+        # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
+        self.spin_mm_conc.setRange(1, 2147483647)
         self.spin_mm_conc.setValue(self.cfg.mm_llm.concurrency)
         self.btn_test_mm = QtWidgets.QPushButton("测试多模态LLM连通性")
 
@@ -288,6 +290,14 @@ class MainWindow(QtWidgets.QMainWindow):
         root_splitter.addWidget(right)
         root_splitter.setSizes([520, 680])
 
+        # 统一为所有主要按钮设置默认图标（避免首次操作前未显示图标的情况）
+        try:
+            self._apply_default_icons()
+        except Exception:
+            pass
+
+        # 放开并发上限：在构建时已设置为 1..2147483647（仅最小值限制）
+
     def _connect_signals(self):
         # 左侧：模式切换与选择输入
         self.radio_mode_file.toggled.connect(self._update_pick_button_text)
@@ -323,6 +333,30 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.btn_pick_input.setText("选择文件夹")
             self.btn_pick_input.setIcon(self._icon("folder"))
+
+    def _apply_default_icons(self):
+        """为界面中的主要按钮设置默认图标（一次性）。
+
+        说明：此前部分图标在特定交互后才被设置，导致首次进入时按钮无图标。
+        这里统一在 UI 构建后设置，保证默认就有图标显示。
+        """
+        # 选择输入按钮（受模式影响，复用已有逻辑）
+        self._update_pick_button_text()
+        # 候选区控制按钮
+        if getattr(self, "btn_add_task", None):
+            self.btn_add_task.setIcon(self._icon("add"))
+        if getattr(self, "btn_select_all_cand", None):
+            self.btn_select_all_cand.setIcon(self._icon("add"))
+        if getattr(self, "btn_deselect_all_cand", None):
+            self.btn_deselect_all_cand.setIcon(self._icon("minus"))
+        # AI 连通性测试
+        if getattr(self, "btn_test_llm", None):
+            self.btn_test_llm.setIcon(self._icon("robot"))
+        if getattr(self, "btn_test_mm", None):
+            self.btn_test_mm.setIcon(self._icon("camera"))
+        # 任务执行按钮
+        if getattr(self, "btn_start", None):
+            self.btn_start.setIcon(self._icon("play"))
 
     def _pick_input(self):
         """根据模式选择视频或文件夹并填充候选文件对。"""

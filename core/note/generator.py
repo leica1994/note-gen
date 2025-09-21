@@ -64,11 +64,18 @@ class NoteGenerator:
         sys = SystemMessage(content=dedent(
             """
             你是一名专业的结构化编辑，任务是将有序字幕拆分为多个'章节'。
+            
             严格要求：
             - 按字幕行号连续覆盖，禁止缺失或重叠；
             - 每个章节返回：title, start_line_no, end_line_no；
             - 章节按行号升序排列；
             - 不做任何摘要或改写，不丢失行。
+            
+            章节划分原则：
+            - 仅在出现明显“主题切换”时新开章节：如引言→主体、主题/场景/对象变化、明确的枚举段落（第一/第二/…）、问答/讲解模式切换、长停顿（>1.5s）、时间/地点/人物切换等。
+            - 章节应能以“名词短语/主题短句”命名，标题需准确概括该章的核心主题，避免纯时间/行号。
+            - 避免将同一主题拆成多个相邻章节；若相邻片段围绕同一主题，应合并为一章。
+            - 若某候选章节过短（例如仅涵盖极少字幕行或极短时长）且无明显边界信号，应与上下文合并，宁可更凝练也不要碎片化。
             """
         ))
         human = HumanMessage(content=dedent(
@@ -79,7 +86,6 @@ class NoteGenerator:
             """
         ))
         t0 = perf_counter()
-        # 单次调用，无需并发限流
         result = self.text_llm.structured_invoke(ChaptersSchema, [sys, human], json_mode=False)
         self.logger.info("分章完成", extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter()-t0)*1000)})
         # 证据
