@@ -41,15 +41,7 @@ class TextLLM:
         if json_mode:
             model_with_schema = self._model.with_structured_output(schema, method="json_mode")
         else:
-            try:
-                model_with_schema = self._model.with_structured_output(schema)
-            except Exception as e:
-                # 某些 OpenAI 兼容端点可能需要显式声明 function_calling
-                try:
-                    log.info("with_structured_output 回退到 function_calling 模式")
-                    model_with_schema = self._model.with_structured_output(schema, method="function_calling")
-                except Exception:
-                    raise e
+            model_with_schema = self._model.with_structured_output(schema)
 
         @self._retry(classify_http_exception)
         def _invoke() -> T:
