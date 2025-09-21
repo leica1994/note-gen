@@ -38,6 +38,39 @@ class Worker(QtCore.QThread):
         super().__init__(parent)
         self.cfg = cfg
         self.task = task
+        # 取消标志：用于优雅停止线程（GUI 关闭时触发）
+        self._cancel = False
+
+    # === 取消相关 ===
+    def request_cancel(self) -> None:
+        """请求取消当前任务。
+        
+        说明：
+        - 仅设置标志位，实际在运行关键阶段间隙检查并提前返回；
+        - 对于长耗时的外部调用（如生成过程），无法即时中断，只能在调用点间隙生效；
+        - 作为兜底，GUI 会在等待超时后调用 QThread.terminate() 强制退出（不推荐，但关闭时最后手段）。
+        """
+        try:
+            self._cancel = True
+            # 同时告知 Qt 线程有中断请求（若 run 内部有检查则可生效）
+            self.requestInterruption()
+        except Exception:
+            self._cancel = True
+
+    def _check_cancel_and_finish(self, logger=None) -> bool:
+        """若已请求取消，则发出“取消”结果并返回 True。"""
+        if self._cancel or self.isInterruptionRequested():
+            try:
+                if logger is not None:
+                    logger.info("任务取消", extra={"status": "取消"})
+            except Exception:
+                pass
+            try:
+                self.finished_with_result.emit("取消", "用户取消")
+            except Exception:
+                pass
+            return True
+        return False
 
     def run(self):
         try:
@@ -46,7 +79,7 @@ class Worker(QtCore.QThread):
             params = json.loads(self.cfg.model_dump_json())
             self.task.task_id = hash_task(self.task.video, self.task.subtitle, params)
 
-            # 输出目录：任务工作目录维持在项目根 outputs 下；Markdown 根目录遵循 GUI 笔记目录（若配置）。
+            # 输出目录：任务工作目录维持在项目根 outputs 下；Markdown 根目录遵循 GUI 配置。
             out_dir = Path(self.cfg.export.outputs_root) / (self.task.task_id or "unknown")
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -56,21 +89,16 @@ class Worker(QtCore.QThread):
                 "video": str(self.task.video),
                 "subtitle": str(self.task.subtitle),
             })
-            # 记录输出目录位置（便于审计）
-            # 计算 Markdown 根目录（若配置了 note.note_dir 则优先）
+            # 记录输出目录位置（便于审计）与配置（敏感打码）
             try:
                 md_root = Path(getattr(getattr(self.cfg, 'note', None), 'note_dir', None) or self.cfg.export.outputs_root)
-            except Exception:
-                md_root = Path(self.cfg.export.outputs_root)
-            try:
                 logger.info("输出目录", extra={
                     "markdown_root": str(md_root),
                     "screenshots_task_dir": str(out_dir),
                     "hi_image_override_dir": str(getattr(getattr(self.cfg, 'note', None), 'screenshot_dir', '') or ''),
                 })
             except Exception:
-                pass
-            # 记录配置（敏感字段打码）
+                md_root = Path(self.cfg.export.outputs_root)
             logger.info("配置快照", extra={
                 "text_llm": {
                     "base_url": self.cfg.text_llm.base_url,
@@ -85,10 +113,12 @@ class Worker(QtCore.QThread):
                 },
                 "screenshot": self.cfg.screenshot.model_dump(mode="json"),
                 "export": self.cfg.export.model_dump(mode="json"),
-                "note": getattr(self.cfg, 'note', None).model_dump(mode="json") if getattr(self.cfg, 'note',
-                                                                                           None) else {
+                "note": getattr(self.cfg, 'note', None).model_dump(mode="json") if getattr(self.cfg, 'note', None) else {
                     "mode": "subtitle"},
             })
+
+            if self._check_cancel_and_finish(logger):
+                return
 
             self.progress_changed.emit(5)
             # 1) 加载字幕
@@ -99,6 +129,10 @@ class Worker(QtCore.QThread):
                 "format": sub_doc.format,
                 "cost_ms": int((perf_counter() - t0) * 1000),
             })
+
+            if self._check_cancel_and_finish(logger):
+                return
+
             self.progress_changed.emit(15)
             # 2) 生成笔记
             generator = NoteGenerator(self.cfg, logger=logger)
@@ -109,11 +143,14 @@ class Worker(QtCore.QThread):
                 "chapters": len(note.chapters),
                 "cost_ms": int((perf_counter() - t1) * 1000),
             })
+
+            if self._check_cancel_and_finish(logger):
+                return
+
             self.progress_changed.emit(85)
             # 3) 导出 Markdown
             exporter = MarkdownExporter(md_root, note_mode=(
                 self.cfg.note.mode if getattr(self.cfg, 'note', None) else 'subtitle'))
-            # 变更：默认笔记文件名改为“视频名称.md”（不再使用任务ID）
             md = exporter.export(note)
             logger.info("导出 Markdown 完成", extra={"path": str(md)})
             self.progress_changed.emit(100)
@@ -151,6 +188,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 顺序执行队列：保存“排队”状态任务的行索引，点击开始后依次串行处理
         self.pending_queue: list[int] = []
         self.candidates: list[tuple[Path, Path]] = []  # 左侧候选“视频-字幕”对（仅界面列表，不触发处理）
+        # 关闭标志：用于窗口关闭时停止一切后台任务
+        self._closing: bool = False
 
         self._build_ui()
         self._connect_signals()
@@ -869,12 +908,70 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_next_in_queue()
 
     def closeEvent(self, event):  # type: ignore[override]
-        # 关闭窗口时尝试保存一次配置（静默，失败也不阻塞关闭）
+        # 关闭窗口时确保停止所有后台任务并尽快退出
+        try:
+            self._stop_all_tasks_on_close()
+        except Exception:
+            # 即便清理失败也不阻塞关闭
+            pass
+        return super().closeEvent(event)
+
+    def _stop_all_tasks_on_close(self) -> None:
+        """在窗口关闭时，停止所有后台任务并尽快退出。
+
+        策略：
+        - 先保存配置；
+        - 清空待执行队列，避免触发后续任务；
+        - 若存在正在运行的 Worker：
+          1) 请求优雅取消并等待短暂时间；
+          2) 超时仍未结束则调用 terminate() 作为兜底；
+        """
+        self._closing = True
+        # 1) 保存配置（静默）
         try:
             self._save_config()
         except Exception:
             pass
-        return super().closeEvent(event)
+        # 2) 清空待执行队列
+        try:
+            self.pending_queue.clear()
+        except Exception:
+            self.pending_queue = []
+        # 可选：将尚未开始的任务标记为“取消”（仅用于 UI 展示一致性）
+        try:
+            for t in self.tasks:
+                if (t.status or "").strip() == "排队":
+                    t.status = "取消"
+        except Exception:
+            pass
+        # 3) 停止当前运行中的 Worker（若有）
+        try:
+            w = self.current_worker
+            if w and w.isRunning():
+                # 优雅取消：通知 Worker
+                if hasattr(w, "request_cancel"):
+                    try:
+                        w.request_cancel()  # 自定义取消标志
+                    except Exception:
+                        pass
+                try:
+                    w.requestInterruption()  # Qt 线程中断请求（若内部检查可生效）
+                except Exception:
+                    pass
+                # 等待最多 3s
+                try:
+                    finished = w.wait(3000)
+                except Exception:
+                    finished = False
+                # 兜底：强制终止并再等待 1s
+                if not finished:
+                    try:
+                        w.terminate()
+                        w.wait(1000)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # 测试连通性（简单结构化返回）
     def _test_text_llm(self):
