@@ -107,8 +107,8 @@ class NoteGenerator:
     def _select_lines(self, items: List[SubtitleSegment], start_line: int, end_line: int) -> List[SubtitleSegment]:
         return [s for s in items if start_line <= s.line_no <= end_line]
 
-    def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment], fix_note: str | None = None,
-                               prev_result: ParagraphsSchema | None = None) -> ParagraphsSchema:
+    def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphsSchema:
+        """让文本 LLM 基于给定字幕片段生成分段结构（不引用历史输出）。"""
         sys = SystemMessage(content=dedent(
             """
             你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。
@@ -134,13 +134,6 @@ class NoteGenerator:
         content_lines = "\n".join(
             f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
         )
-        fix_extra = f"\n\n修正提示：{fix_note}" if fix_note else ""
-        prev_block = ""
-        if prev_result is not None:
-            # 上一轮失败的段落 JSON，用于指导本轮修正（最小变更）
-            import json as _json
-            prev_json = _json.dumps(prev_result.model_dump(), ensure_ascii=False, indent=2)
-            prev_block = f"\n\n上一轮输出（供修正，JSON）：\n{prev_json}"
         human = HumanMessage(content=dedent(
             f"""
             章节标题：{chapter_title}
@@ -148,8 +141,8 @@ class NoteGenerator:
 
             {content_lines}
 
-            注意：严格使用以上行号，确保完整覆盖且不重叠。{fix_extra}
-            请在上一轮输出的基础上进行最小必要修改：补齐缺失行、移除重复/多余行，保持行号与时间戳与输入一致，不要改写文本，不要引入列表外行号。{prev_block}
+            注意：严格使用以上行号，确保完整覆盖且不重叠；
+            保持行号与时间戳与输入一致，不要改写文本，不要引入列表外行号。
             """
         ))
         with self._text_sem:
@@ -489,32 +482,11 @@ class NoteGenerator:
         if not segs:
             raise ValueError(f"章节无内容：{cb}")
 
-        # 分段（业务重试，最多3次）
+        # 分段（业务重试，最多3次；重试不携带上次输出或错误信息）
         max_attempts = 3
-        last_issue: Dict[str, Any] | None = None
-        last_result: ParagraphsSchema | None = None
         pgs: ParagraphsSchema | None = None
         for attempt in range(1, max_attempts + 1):
-            fix_note = None
-            if last_issue:
-                parts = []
-                if last_issue.get("missing"):
-                    parts.append(f"缺失行号: {last_issue['missing']}")
-                if last_issue.get("extra"):
-                    parts.append(f"多余行号: {last_issue['extra']}")
-                if last_issue.get("duplicate"):
-                    parts.append(f"重复行号: {last_issue['duplicate']}")
-                if last_issue.get("overlap"):
-                    parts.append("段落时间重叠")
-                if not last_issue.get("coverage_ok", True):
-                    parts.append("时间未完整覆盖章节范围")
-                if last_issue.get("boundary_mismatch"):
-                    parts.append("段落边界必须等于该段落所有行的最小开始与最大结束；禁止修改任何行的时间戳")
-                fix_note = "；".join(parts)
-
-            pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note, prev_result=last_result)
-
-            # 证据归档能力已移除（简化发布版）
+            pgs = self._prompt_for_paragraphs(cb.title, segs)
 
             try:
                 self._validate_time_coverage(segs, pgs.paragraphs)
@@ -522,10 +494,7 @@ class NoteGenerator:
                                  extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt})
                 break
             except Exception:
-                # 记录当前失败输出，供下一轮提示参考
-                last_result = pgs
                 issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
-                last_issue = issue
                 self.logger.info("章节校验失败，准备重试", extra={"chapter_index": ci, "attempt": attempt, **issue})
                 if attempt >= max_attempts:
                     self.logger.warning(
@@ -589,6 +558,7 @@ class NoteGenerator:
             })
             chosen_idx = self._choose_best_frame(para, grid_path, ci, para_index or 0, subpath=label)
             chosen_ts = timestamps[chosen_idx - 1]
+
             # 高清重拍
             # 高清截图文件名：视频名称_段落标题_时间戳（去除符号），如 11:11:11 -> 111111
             def _sanitize_filename(name: str) -> str:
