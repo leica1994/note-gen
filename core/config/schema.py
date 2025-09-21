@@ -82,6 +82,12 @@ class NoteConfig(BaseModel):
     """
 
     mode: Literal["subtitle", "optimized"] = Field(default="subtitle", description="笔记模式")
+    # 新增：笔记/截图目录配置（作为输出根目录的优先覆盖）。
+    # 说明：
+    # - input_dir：若设置，则 Markdown 输出写入该目录；否则回退至 export.outputs_root。
+    # - screenshot_input_dir：若设置，则截图输出写入该目录下 <task_id> 子目录；否则回退至 export.outputs_root/<task_id>。
+    input_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
+    screenshot_input_dir: Optional[Path] = Field(default=None, description="截图目录（截图输出根目录优先覆盖）")
 
 
 class AppConfig(BaseModel):

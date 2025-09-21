@@ -36,9 +36,14 @@ core/utils/            # 日志、哈希、重试、脱敏
 ## 使用步骤（GUI）
 1) 选择视频与同名字幕（或选择文件夹批量匹配）。
 2) 配置 AI：在“AI 参数配置”中填写 `base_url`、`api_key`、`model`，可点击“测试连通性”。
-3) 配置笔记模式（字幕模式/AI 优化）。
+3) 配置笔记参数：选择“笔记模式”；可按需设置“笔记输入目录/截图输入地址（目录）”。
 4) 将候选加入任务列表，点击“开始处理任务列表”。
-5) 完成后在 `outputs/<task_id>/` 查看 Markdown 与图片；日志位于 `logs/<task_id>/`。
+5) 完成后在以下位置查看输出：
+   - Markdown：优先写入 GUI 配置的“笔记输入目录”，否则 `outputs/<视频名>.md`。
+   - 图片：
+     - 高清重拍：若配置了“截图输入地址”，则直接写到该目录；否则在 `outputs/<task_id>/...`。
+     - 九宫格与缩略图：`outputs/<task_id>/chapter_x/para_y/...`。
+   - 日志：`logs/<task_id>/`。
 
 ## 配置说明（cache.json）
 - 文本 LLM（`text_llm`）与多模态 LLM（`mm_llm`）：
@@ -48,10 +53,16 @@ core/utils/            # 日志、哈希、重试、脱敏
   - `edge_margin_sec`：默认 `0.5` 秒，时间点避开段落首尾；
   - `max_workers`：截图并发。
 - 导出（`export`）：`outputs_root`、`logs_root`。
-- 笔记（`note`）：`mode = subtitle | optimized`。
+- 笔记（`note`）：
+  - `mode = subtitle | optimized`
+  - `input_dir`：笔记输入目录（若设置，Markdown 输出写入该目录）
+  - `screenshot_input_dir`：截图输入地址（若设置，高清重拍图片写入该目录）
 
 ## 生成与输出
-- 结构：`outputs/<task_id>/<task_id>.md` + `outputs/<task_id>/chapter_x/para_y[/sub_n]/(grid.jpg|hi.jpg)`
+- Markdown：优先 `<note.input_dir>/<视频名>.md`，否则 `outputs/<视频名>.md`
+- 图片：
+  - 高清重拍：`<note.screenshot_input_dir>/<视频名>_<段落标题>_<HHMMSS>.jpg`（若配置），否则 `outputs/<task_id>/...`
+  - 九宫格：`outputs/<task_id>/chapter_x/para_y/grid.jpg`
 - Markdown 标题：章 `#`、段 `##`、子段 `###`…；每段插入对应图片（若有）。
 
 ## 运行日志
@@ -63,6 +74,9 @@ core/utils/            # 日志、哈希、重试、脱敏
 - 图片卡在过渡帧：可增大 `screenshot.edge_margin_sec`（如 0.6–0.8）。
 
 ## 近期更新
+- Markdown 默认文件名改为“视频名.md”。
+- 高清截图默认文件名改为“视频名_段落标题_HHMMSS.jpg”（示例 11:11:11 → 111111）。
+- GUI 可配置“截图输入地址”用于存放高清重拍图片（其他输出仍在 `outputs/`）。
 - 删除 evidence 归档功能与相关配置，简化发布。
 - 子段落递归截图，解决三级标题无图问题。
 - 选图提示词强化，明确拒绝“叠化/重影/运动模糊/切换覆盖层/大遮挡/截断”。
@@ -71,4 +85,3 @@ core/utils/            # 日志、哈希、重试、脱敏
 ## 贡献说明
 - 代码风格：PEP 8、4 空格、类型注解；中文注释。
 - 依赖管理：使用 `uv`；新增依赖请通过 `uv add <包名>` 并同步 `uv.lock`。
-

@@ -591,7 +591,46 @@ class NoteGenerator:
             chosen_idx = self._choose_best_frame(para, grid_path, ci, para_index or 0, subpath=label)
             chosen_ts = timestamps[chosen_idx - 1]
             # 高清重拍
-            hi_path = base_dir / "hi.jpg"
+            # 高清截图文件名：视频名称_段落标题_时间戳（去除符号），如 11:11:11 -> 111111
+            def _sanitize_filename(name: str) -> str:
+                """将任意字符串转换为安全文件名：移除非法字符并将空白替换为下划线。"""
+                import re
+                # 去除路径分隔与常见非法字符
+                name = re.sub(r"[\\/\\?%\*:|\"<>]", "", name)
+                # 替换空白为下划线，收尾裁剪
+                name = re.sub(r"\s+", "_", name).strip("._ ")
+                # 控制长度，过长时截断
+                return name[:150] or "untitled"
+
+            def _format_ts_hhmmss(ts: float) -> str:
+                t = max(0, int(ts))
+                hh = t // 3600
+                mm = (t % 3600) // 60
+                ss = t % 60
+                return f"{hh:02d}{mm:02d}{ss:02d}"
+
+            video_stem = Path(meta.video_path).stem
+            ts_str = _format_ts_hhmmss(chosen_ts)
+            safe_title = _sanitize_filename(para.title or "")
+            safe_video = _sanitize_filename(video_stem)
+            hi_name = f"{safe_video}_{safe_title}_{ts_str}.jpg"
+            # 高清图输出位置：
+            # - 若 GUI 配置了截图目录（note.screenshot_input_dir），则写入该目录；
+            # - 否则仍写入任务输出目录（base_dir）。
+            hi_root = None
+            try:
+                hi_root = getattr(getattr(self.cfg, 'note', None), 'screenshot_input_dir', None)
+            except Exception:
+                hi_root = None
+            if hi_root:
+                out_root = Path(hi_root)
+            else:
+                out_root = base_dir
+            try:
+                out_root.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            hi_path = out_root / hi_name
             t_hq = perf_counter()
             with self._shot_sem:
                 self.screenshotter.capture_high_quality(Path(meta.video_path), chosen_ts, hi_path)

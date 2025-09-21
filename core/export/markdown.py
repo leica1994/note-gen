@@ -62,11 +62,16 @@ class MarkdownExporter:
         # 图片（若有）：使用相对路径（相对于 outputs_root）
         if p.image and p.image.hi_res_image_path:
             img_path = p.image.hi_res_image_path
+            # 尝试生成相对路径；跨盘符（如 C: 与 D:）时退回为绝对路径
             try:
                 img_rel = img_path.relative_to(self.outputs_root)
             except Exception:
                 from os.path import relpath
-                img_rel = Path(relpath(img_path, start=self.outputs_root))
+                try:
+                    img_rel = Path(relpath(str(img_path), start=str(self.outputs_root)))
+                except Exception:
+                    # 跨盘符或其他异常：直接使用绝对路径，Markdown 解析器通常可识别本地绝对路径
+                    img_rel = img_path
             out.append("")
             out.append(f"![]({img_rel.as_posix()})")
             out.append("")
