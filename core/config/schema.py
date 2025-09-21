@@ -49,8 +49,10 @@ class ScreenshotConfig(BaseModel):
     edge_margin_sec: float = Field(default=0.5, ge=0.0, description="时间点生成的首尾边缘留白（秒）")
     max_workers: int = Field(default=1, ge=1, le=64, description="截图/段落处理并发数（固定串行建议设为1）")
     # 硬件加速（可选）：例如 cuda/qsv/dxva2/d3d11va/vaapi 等；默认不启用
-    hwaccel: Optional[str] = Field(default=None, description="ffmpeg -hwaccel 参数（如 cuda/qsv/dxva2/vaapi），默认 None 关闭")
-    hwaccel_device: Optional[str] = Field(default=None, description="ffmpeg -hwaccel_device（如 cuda:0 或 /dev/dri/renderD128），默认 None")
+    hwaccel: Optional[str] = Field(default=None,
+                                   description="ffmpeg -hwaccel 参数（如 cuda/qsv/dxva2/vaapi），默认 None 关闭")
+    hwaccel_device: Optional[str] = Field(default=None,
+                                          description="ffmpeg -hwaccel_device（如 cuda:0 或 /dev/dri/renderD128），默认 None")
 
     @property
     def grid_count(self) -> int:
@@ -61,11 +63,9 @@ class ExportConfig(BaseModel):
     """导出与目录配置。"""
 
     outputs_root: Path = Field(default=Path("outputs"), description="输出根目录")
-    evidence_root: Path = Field(default=Path("evidence"), description="证据根目录")
     logs_root: Path = Field(default=Path("logs"), description="日志根目录")
-    save_prompts_and_raw: bool = Field(default=True, description="保存提示词与原始返回以供审计")
 
-    @field_validator("outputs_root", "evidence_root", "logs_root")
+    @field_validator("outputs_root", "logs_root")
     @classmethod
     def _ensure_dir(cls, v: Path) -> Path:
         v.mkdir(parents=True, exist_ok=True)
@@ -94,6 +94,3 @@ class AppConfig(BaseModel):
     screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
     note: NoteConfig = Field(default_factory=NoteConfig)
-
-
-    

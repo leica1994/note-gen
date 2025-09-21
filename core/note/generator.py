@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from textwrap import dedent
 from time import perf_counter
 from typing import List, Dict, Any, Set, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 from langchain_core.messages import SystemMessage, HumanMessage
-from textwrap import dedent
 
 from core.config.schema import AppConfig
 from core.llms.mm_llm import MultiModalLLM
@@ -27,8 +28,6 @@ from core.note.models import (
 from core.screenshot.ffmpeg import Screenshotter
 from core.screenshot.grid import generate_grid_timestamps
 from core.subtitles.models import SubtitleSegment
-from core.utils.evidence import EvidenceWriter
-import logging
 
 
 class NoteGenerator:
@@ -42,9 +41,8 @@ class NoteGenerator:
     5) 汇总：生成 Note 对象，用于后续导出 Markdown
     """
 
-    def __init__(self, config: AppConfig, evidence: EvidenceWriter, logger: logging.Logger | None = None) -> None:
+    def __init__(self, config: AppConfig, logger: logging.Logger | None = None) -> None:
         self.cfg = config
-        self.evidence = evidence
         self.text_llm = TextLLM(config.text_llm)
         self.mm_llm = MultiModalLLM(config.mm_llm)
         self.screenshotter = Screenshotter(config.screenshot)
@@ -92,23 +90,25 @@ class NoteGenerator:
         ))
         t0 = perf_counter()
         result = self.text_llm.structured_invoke(ChaptersSchema, [sys, human], json_mode=False)
+
         # 标题后置中文化校验：若极端情况下仍出现非中文标题，以“第N章”占位保证中文化
         def _has_cjk(s: str) -> bool:
             return any('\u4e00' <= ch <= '\u9fff' for ch in s)
+
         for idx, ch in enumerate(result.chapters, start=1):
             if not ch.title or not _has_cjk(ch.title):
                 ch.title = f"第{idx}章"
-        self.logger.info("分章完成", extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter()-t0)*1000)})
+        self.logger.info("分章完成",
+                         extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter() - t0) * 1000)})
         # 证据
-        if self.cfg.export.save_prompts_and_raw:
-            self.evidence.write_text("chapters_prompt.txt", f"{sys.content}\n\n{human.content}")
-            self.evidence.write_json("chapters_result.json", result.model_dump())
+        # 调试证据归档能力已移除（简化发布版）
         return result
 
     def _select_lines(self, items: List[SubtitleSegment], start_line: int, end_line: int) -> List[SubtitleSegment]:
         return [s for s in items if start_line <= s.line_no <= end_line]
 
-    def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment], fix_note: str | None = None, prev_result: ParagraphsSchema | None = None) -> ParagraphsSchema:
+    def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment], fix_note: str | None = None,
+                               prev_result: ParagraphsSchema | None = None) -> ParagraphsSchema:
         sys = SystemMessage(content=dedent(
             """
             你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。
@@ -238,10 +238,10 @@ class NoteGenerator:
         }
 
     def _auto_fix_paragraph_lines(
-        self,
-        segs: List[SubtitleSegment],
-        paragraphs: List[ParagraphSchema],
-        issue: Dict[str, Any] | None = None,
+            self,
+            segs: List[SubtitleSegment],
+            paragraphs: List[ParagraphSchema],
+            issue: Dict[str, Any] | None = None,
     ) -> Dict[str, int]:
         """在重试耗尽后自动修正段落的字幕行集合，使其与输入字幕一致。
 
@@ -381,7 +381,7 @@ class NoteGenerator:
 
         # 顶层段落排序并合并重叠时间范围，保证校验通过（不改变行集合）
         def _para_min_line_no(p: ParagraphSchema) -> int:
-            return min((l.line_no for l in p.lines), default=10**9)
+            return min((l.line_no for l in p.lines), default=10 ** 9)
 
         paragraphs.sort(key=_para_min_line_no)
         merged: List[ParagraphSchema] = []
@@ -465,18 +465,13 @@ class NoteGenerator:
         # 受多模态 LLM 并发限制
         with self._mm_sem:
             chosen = self.mm_llm.choose_index(instruction, str(grid_path))
-        if self.cfg.export.save_prompts_and_raw:
-            base = f"chapters/{ci}/para_{pi}"
-            if subpath:
-                base = f"{base}/{subpath}"
-            self.evidence.write_text(f"{base}/choose_image_instruction.txt", instruction)
-            self.evidence.write_text(f"{base}/choose_image_result.txt", str(chosen))
+        # 证据归档移除
         return int(chosen)
 
     def _convert_paragraph(self, ps: ParagraphSchema) -> Paragraph:
         lines = [
             SubtitleSegment(line_no=l.line_no, start_sec=l.start_sec, end_sec=l.end_sec, text=l.text)
-        for l in ps.lines
+            for l in ps.lines
         ]
         children = [self._convert_paragraph(c) for c in ps.children] if ps.children else []
         return Paragraph(
@@ -519,50 +514,12 @@ class NoteGenerator:
 
             pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note, prev_result=last_result)
 
-            # 证据：按尝试次数归档
-            if self.cfg.export.save_prompts_and_raw:
-                content_lines = "\n".join(
-                    f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
-                )
-                fix_extra = f"\n\n修正提示：{fix_note}" if fix_note else ""
-                prev_note = "（含上一轮输出与问题）" if last_result or last_issue else ""
-                from textwrap import dedent as _dedent
-                prompt_text = _dedent(
-                    f"""
-                    你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。{prev_note}
-                    严格要求：
-                    - 覆盖所有提供的字幕行；
-                    - 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；
-                    - lines 数组逐条包含 line_no, start_sec, end_sec, text（保留原文）；
-                    - 段落时间戳覆盖必须完整且不重叠，不得缺失；可以有子段落；
-                    - 不做摘要或改写；
-                    - 若没有子段落，children 必须返回空数组 []，不要返回空对象 {{}} 或 null；
-                    - 只能使用下方提供的行号，每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外的行号。
-                    - 同级段落按时间升序排列，互不重叠，顶层段落共同完整覆盖章节时间范围。
-
-                    额外输出：optimized
-                    - 为每个（含子层级）段落生成一个 optimized 字段：类型为字符串列表 List[str]；
-                    - 将该段落内所有字幕行去除语气词后，添加合适标点，拼接成流畅的句子；
-                    - 如果内容较长、可自然分段，请将 optimized 拆分为多条字符串；否则可只返回 1 条；
-                    - 对句子中的重点知识点请使用 Markdown 进行标记（例如 **加粗**、`行内代码`、列表等）；
-                    - 严禁在 optimized 中捏造未出现在该段落字幕中的事实；
-                    - 保留术语与数字的准确性，保持时序逻辑。
-
-                    章节标题：{cb.title}
-                    {content_lines}
-                    {fix_extra}
-                    """
-                )
-                self.evidence.write_text(f"chapters/{ci}/attempt_{attempt}/paragraphs_prompt.txt", prompt_text)
-                self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/paragraphs_result.json", pgs.model_dump())
-                if last_result is not None:
-                    self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/prev_result.json", last_result.model_dump())
-                if last_issue is not None:
-                    self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/prev_issue.json", last_issue)
+            # 证据归档能力已移除（简化发布版）
 
             try:
                 self._validate_time_coverage(segs, pgs.paragraphs)
-                self.logger.info("章节校验通过", extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt})
+                self.logger.info("章节校验通过",
+                                 extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt})
                 break
             except Exception:
                 # 记录当前失败输出，供下一轮提示参考
@@ -597,7 +554,8 @@ class NoteGenerator:
         assert pgs is not None
 
         # 段落并发：截图→九宫格→多模态→高清
-        def _decorate_with_images(para: Paragraph, base_dir: Path, label: str | None = None, para_index: int | None = None) -> None:
+        def _decorate_with_images(para: Paragraph, base_dir: Path, label: str | None = None,
+                                  para_index: int | None = None) -> None:
             # 生成九宫格并选择
             timestamps = generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
             thumbs_dir = base_dir / "thumbs"
@@ -628,7 +586,7 @@ class NoteGenerator:
                 "para_index": para_index or 0,
                 "sub_index": label or "",
                 "grid": str(grid_path),
-                "cost_ms": int((perf_counter()-t_s)*1000),
+                "cost_ms": int((perf_counter() - t_s) * 1000),
             })
             chosen_idx = self._choose_best_frame(para, grid_path, ci, para_index or 0, subpath=label)
             chosen_ts = timestamps[chosen_idx - 1]
@@ -644,7 +602,7 @@ class NoteGenerator:
                 "chosen_index": chosen_idx,
                 "timestamp_sec": chosen_ts,
                 "hi_image": str(hi_path),
-                "cost_ms": int((perf_counter()-t_hq)*1000),
+                "cost_ms": int((perf_counter() - t_hq) * 1000),
             })
             para.image = ParagraphImage(
                 grid_image_path=grid_path,
@@ -689,9 +647,7 @@ class NoteGenerator:
     def generate(self, meta: GenerationInputMeta, task_out_dir: Path) -> Note:
         # 1) 分章
         chs = self._prompt_for_chapters(meta)
-        if self.cfg.export.save_prompts_and_raw:
-            # 保存分章证据已在 _prompt_for_chapters 中记录，此处不重复
-            pass
+        # 发布版不再归档证据
 
         # 2) 章节并发处理
         chapters: List[Chapter] = [None] * len(chs.chapters)  # type: ignore[list-item]

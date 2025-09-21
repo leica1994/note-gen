@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import base64
-from typing import Type, TypeVar
+import logging
 from pathlib import Path
+from typing import Type, TypeVar
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 
 from core.config.schema import MultiModalConfig
 from core.utils.retry import RetryPolicy, classify_http_exception
-import logging
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -76,7 +76,7 @@ class MultiModalLLM:
                 # 结构化解析/校验异常重试（常见于返回带 ```json 围栏的内容）
                 msg_text = str(e)
                 is_parse_error = isinstance(e, ValidationError) or (
-                    "json_invalid" in msg_text or "Invalid JSON" in msg_text or "validation error" in msg_text
+                        "json_invalid" in msg_text or "Invalid JSON" in msg_text or "validation error" in msg_text
                 )
                 if is_parse_error and attempt < 3:
                     log.info("结构化解析失败，准备重试", extra={"attempt": attempt, "max": 3})

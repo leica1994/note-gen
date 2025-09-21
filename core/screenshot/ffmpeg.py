@@ -36,8 +36,8 @@ class Screenshotter:
         return args
 
     def _run_ffmpeg_fast_seek(self, video: Path, out_path: Path, ts_sec: float,
-                               width: int | None = None, height: int | None = None,
-                               quality: int | None = None) -> None:
+                              width: int | None = None, height: int | None = None,
+                              quality: int | None = None) -> None:
         """快速寻址：`-ss` 放在 `-i` 之前，牺牲极小精度换取显著速度。
 
         适用：九宫格缩略图等“代表性帧”场景。
@@ -68,7 +68,7 @@ class Screenshotter:
         return wrapped()
 
     def _run_ffmpeg_dual_seek(self, video: Path, out_path: Path, ts_sec: float,
-                               pre_window: float = 5.0, quality: int | None = None) -> None:
+                              pre_window: float = 5.0, quality: int | None = None) -> None:
         """双阶段寻址：先粗跳、再精确。
 
         - 先执行 `-ss pre_seek -i input` 进行快速粗跳；
@@ -134,9 +134,9 @@ class Screenshotter:
         return out_path
 
     def compose_grid_one_shot(self, video: Path, timestamps: List[float], out_path: Path,
-                               *, cols: int | None = None, rows: int | None = None,
-                               width: int | None = None, height: int | None = None,
-                               tol: float = 0.05) -> Path:
+                              *, cols: int | None = None, rows: int | None = None,
+                              width: int | None = None, height: int | None = None,
+                              tol: float = 0.05) -> Path:
         """一次 ffmpeg 完成九宫格（无需中间缩略图）。
 
         - 通过 select + tile 过滤器从同一段时间窗口内选取 9 帧并铺成网格；

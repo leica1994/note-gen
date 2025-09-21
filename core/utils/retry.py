@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import time
 from functools import wraps
-from typing import Callable, TypeVar, ParamSpec, Any
-
+from typing import Callable, TypeVar, ParamSpec
 
 P = ParamSpec("P")
 R = TypeVar("R")

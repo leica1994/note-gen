@@ -21,4 +21,3 @@ class SubtitleDocument(BaseModel):
     items: List[SubtitleSegment] = Field(default_factory=list)
     source_path: Path
     format: str = Field(description="来源格式：ass|srt|vtt")
-

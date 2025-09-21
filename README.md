@@ -1,72 +1,74 @@
 # note-gen — 基于字幕与视频的 AI 笔记生成器（PySide6 GUI）
 
-note-gen 是一个本地运行的 AI 辅助笔记生成工具：读取视频与同名字幕，按“分章 → 分段 → 智能选图 → 导出 Markdown”的流程，生成结构化、适合知识管理的学习笔记。项目内置参数记忆与证据留存，方便审计与复现。
+note-gen 读取视频与同名字幕，自动完成“分章 → 分段 → 智能选图 → 导出 Markdown”，生成结构化学习笔记。发布版移除了开发期的证据归档，专注简洁与易用。
 
-## 核心能力
-- 字幕解析：支持 `.srt/.ass/.ssa/.vtt`，与视频同名自动配对。
-- 结构化生成：LLM 识别章节与段落，保留时间轴与字幕行，支持“字幕模式/AI 优化模式”。
-- 智能选图：等距截帧生成九宫格，调用多模态 LLM 选择最代表内容的截图，并重拍高清帧。
-- 导出与留存：导出 Markdown；保存提示词、原始返回与过程证据到 `evidence/`；日志脱敏。
+## 功能特性
+- 字幕解析：支持 `.srt/.ass/.ssa/.vtt`，自动匹配同名字幕。
+- 结构化生成：按时间轴分章/分段，保留原始行文本；支持“字幕模式/AI 优化模式”。
+- 智能选图：等距截帧生成九宫格，调用多模态 LLM 选择代表性帧并重拍高清图。
+- 稳定性：
+  - 段落首尾加入时间点边缘留白 `edge_margin_sec`，减少过渡帧；
+  - 子段落（三级及更深标题）同样生成图片。
+- 导出与日志：生成 Markdown 与图片到 `outputs/`；运行日志在 `logs/`。
 
 ## 目录结构
 ```
-main.py                # 应用入口（启动 GUI）
-core/gui/app.py        # GUI 主程序（左右布局 + 参数记忆）
-core/gui/assets/       # 图标与界面资源
-core/config/           # 配置模型与 cache（cache.json）
-core/subtitles/        # 字幕加载与模型
-core/note/             # 笔记生成（分章/分段/选图）
-core/screenshot/       # ffmpeg 截图与九宫格
+main.py                # 入口（启动 GUI）
+core/gui/app.py        # GUI 主程序
+core/config/           # 配置与缓存（cache.json）
+core/subtitles/        # 字幕加载
+core/note/             # 分章/分段/截图/组装
+core/screenshot/       # FFmpeg 截帧与九宫格
 core/export/           # Markdown 导出
-core/utils/            # 证据、日志、哈希、脱敏、重试
+core/llms/             # 文本与多模态 LLM 封装
+core/utils/            # 日志、哈希、重试、脱敏
 ```
 
-## 环境与安装（uv 管理）
-- 依赖：Python 3.13+、FFmpeg（命令 `ffmpeg` 可用，或在 GUI 中调整路径）。
-- 安装与同步：`uv sync`
+## 环境要求
+- Python 3.13+
+- FFmpeg（命令 `ffmpeg` 可用，或在 GUI 中指定路径）
+- 依赖管理：uv
+
+## 安装与运行
+- 安装依赖：`uv sync`
 - 启动 GUI：`uv run main.py`
-- 以模块方式运行（可选）：`uv run -m core.gui.app`
-- 新增依赖：`uv add <包名>`（自动更新 `uv.lock`）
 
-## 截图稳定性改进（2025-09-21）
-- 新增 `ScreenshotConfig.edge_margin_sec`（默认 0.5s）：九宫格时间点在计算时自动避开段落首尾的过渡帧（淡入/淡出），降低“卡在过渡帧”的概率。
-- 为子段落（三级及更深标题）同样生成九宫格与高清截图；Markdown 递归渲染图片，弥补此前子段无图的问题。
-- 如需恢复旧行为，将 `edge_margin_sec` 设为 `0.0` 即可。
+## 使用步骤（GUI）
+1) 选择视频与同名字幕（或选择文件夹批量匹配）。
+2) 配置 AI：在“AI 参数配置”中填写 `base_url`、`api_key`、`model`，可点击“测试连通性”。
+3) 配置笔记模式（字幕模式/AI 优化）。
+4) 将候选加入任务列表，点击“开始处理任务列表”。
+5) 完成后在 `outputs/<task_id>/` 查看 Markdown 与图片；日志位于 `logs/<task_id>/`。
 
-## GUI 使用说明（新版布局）
-- 左右布局：右侧“任务列表”；左侧上下分为“选择与候选列表”“参数配置”。
-- 左上 – 选择与候选列表：
-  - 选择模式：
-    - 文件模式：选择一个视频，自动匹配同名字幕。
-    - 文件夹模式：扫描目录，查找同名“视频-字幕”对（当前不递归）。
-  - 候选表：列为【选择/视频/字幕/目录】，支持复选框、多选；提供“全选/全不选/添加到右侧任务列表”。
-- 左下 – 参数配置（标签页）：
-  - AI 参数配置：文本 LLM 与多模态 LLM 的 `base_url/api_key/model/并发`，支持“连通性测试”。
-  - 笔记参数配置：`note.mode`（`subtitle`/`optimized`）。所有参数变更自动写入 `cache.json`。
-- 右侧 – 任务列表：
-  - 列为【任务ID/视频/字幕/状态/进度%/错误】；选中后点击“开始处理选中任务”。
+## 配置说明（cache.json）
+- 文本 LLM（`text_llm`）与多模态 LLM（`mm_llm`）：
+  - `base_url`、`api_key`、`model`、`concurrency`、`request_timeout`。
+- 截图（`screenshot`）：
+  - `ffmpeg_path`、`low_width/low_height`、`grid_columns/rows`、`hi_quality`；
+  - `edge_margin_sec`：默认 `0.5` 秒，时间点避开段落首尾；
+  - `max_workers`：截图并发。
+- 导出（`export`）：`outputs_root`、`logs_root`。
+- 笔记（`note`）：`mode = subtitle | optimized`。
 
-## 处理流程与产物
-1) 加载字幕：`core/subtitles/loader.py`
-2) 生成笔记：`core/note/generator.py`
-   - 分章/分段：`TextLLM` 结构化输出（见 `core/llms/`）。
-   - 选图：`core/screenshot/` 生成九宫格，`MultiModalLLM` 选择，随后高清重拍。
-3) 导出 Markdown：`core/export/markdown.py`（文件名：`outputs/<task_id>/<task_id>.md`）
-4) 证据与日志：
-   - `evidence/<task_id>/` 保存提示词、原始返回与中间结果（`EvidenceWriter`）。
-   - `logs/` 记录任务全流程（敏感信息经 `mask_secret` 脱敏）。
+## 生成与输出
+- 结构：`outputs/<task_id>/<task_id>.md` + `outputs/<task_id>/chapter_x/para_y[/sub_n]/(grid.jpg|hi.jpg)`
+- Markdown 标题：章 `#`、段 `##`、子段 `###`…；每段插入对应图片（若有）。
 
-## 参数要点（GUI 可视化配置）
-- 文本 LLM/多模态 LLM：`base_url`、`api_key`、`model`、`concurrency`、`timeout` 等。
-- 截图：`ffmpeg_path`、`grid_columns/rows`、`hi_quality`、`max_workers`。
-- 导出：`outputs_root`、`evidence_root`、`logs_root`、`save_prompts_and_raw`。
-- 笔记模式：`note.mode = subtitle | optimized`。
+## 运行日志
+- `logs/<task_id>/run.log`：包含加载字幕、分章/分段、九宫格与高清重拍等阶段信息（敏感信息已脱敏）。
 
-## 常见问题
-- 无法截帧：确认已安装 FFmpeg 或修改 GUI 中的 `ffmpeg_path`。
-- LLM 连通性报错：在 GUI “AI 参数配置”中使用“测试连通性”自检；检查 `base_url/api_key/model`。
-- 未匹配到字幕：确保字幕与视频同名，扩展名为 `.srt/.ass/.ssa/.vtt`。
+## 故障排查
+- 无法截帧：检查 FFmpeg 是否可用，或在 GUI 中设置 `ffmpeg_path`。
+- LLM 错误：在“AI 参数配置”中测试连通性；检查 `base_url/api_key/model`。
+- 图片卡在过渡帧：可增大 `screenshot.edge_margin_sec`（如 0.6–0.8）。
 
-## 贡献与说明
-- 开发规范与提交要求见 `AGENTS.md`。
-- 建议使用 Conventional Commits；GUI 改动注意“最小变更边界”，并在 `evidence/` 留存关键证据。
+## 近期更新
+- 删除 evidence 归档功能与相关配置，简化发布。
+- 子段落递归截图，解决三级标题无图问题。
+- 选图提示词强化，明确拒绝“叠化/重影/运动模糊/切换覆盖层/大遮挡/截断”。
+- 九宫格时间点加入边缘留白（默认 0.5s）。
+
+## 贡献说明
+- 代码风格：PEP 8、4 空格、类型注解；中文注释。
+- 依赖管理：使用 `uv`；新增依赖请通过 `uv add <包名>` 并同步 `uv.lock`。
+

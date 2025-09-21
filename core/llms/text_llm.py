@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Type, TypeVar
 
 from langchain_openai import ChatOpenAI
@@ -7,7 +8,6 @@ from pydantic import BaseModel
 
 from core.config.schema import LLMConfig
 from core.utils.retry import RetryPolicy, classify_http_exception
-import logging
 
 T = TypeVar("T", bound=BaseModel)
 

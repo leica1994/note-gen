@@ -5,7 +5,6 @@ import logging
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
 
 
 class JsonFormatter(logging.Formatter):
@@ -27,7 +26,9 @@ class JsonFormatter(logging.Formatter):
         # 合并额外字段（extra）
         for k, v in record.__dict__.items():
             # 过滤标准字段与 asyncio 注入的 taskName（避免恒为 null 干扰阅读）
-            if k in {"args", "msg", "name", "levelno", "levelname", "created", "msecs", "relativeCreated", "pathname", "filename", "module", "lineno", "funcName", "exc_info", "exc_text", "stack_info", "thread", "threadName", "processName", "process", "taskName"}:
+            if k in {"args", "msg", "name", "levelno", "levelname", "created", "msecs", "relativeCreated", "pathname",
+                     "filename", "module", "lineno", "funcName", "exc_info", "exc_text", "stack_info", "thread",
+                     "threadName", "processName", "process", "taskName"}:
                 continue
             # 跳过内部记录属性，仅保留用户 extra
             if k.startswith("_"):

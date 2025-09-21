@@ -15,4 +15,3 @@ def hash_task(video_path: str | Path, subtitle_path: str | Path, params: dict[st
     h.update(b"|")
     h.update(json.dumps(params, sort_keys=True, ensure_ascii=False).encode("utf-8"))
     return h.hexdigest()[:12]
-

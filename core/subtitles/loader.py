@@ -37,6 +37,7 @@ def load_subtitle(path: str | Path) -> SubtitleDocument:
 
     elif ext == ".vtt":
         vtt = webvtt.read(str(p))
+
         def ts_to_sec(ts: str) -> float:
             h, m, s = ts.split(":")
             sec = float(s.replace(",", "."))
@@ -67,4 +68,3 @@ def load_subtitle(path: str | Path) -> SubtitleDocument:
         last_end = seg.end_sec
 
     return SubtitleDocument(items=items, source_path=p, format=fmt)
-

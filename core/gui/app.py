@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 from time import perf_counter
+from typing import Optional
+
 from PySide6 import QtCore, QtWidgets, QtGui
 
 from core.config.cache import ConfigCache
@@ -13,7 +14,6 @@ from core.export.markdown import MarkdownExporter
 from core.note.generator import NoteGenerator
 from core.note.models import GenerationInputMeta
 from core.subtitles.loader import load_subtitle
-from core.utils.evidence import EvidenceWriter
 from core.utils.hash import hash_task
 from core.utils.logger import init_task_logger
 from core.utils.secrets import mask_secret
@@ -46,7 +46,6 @@ class Worker(QtCore.QThread):
             params = json.loads(self.cfg.model_dump_json())
             self.task.task_id = hash_task(self.task.video, self.task.subtitle, params)
 
-            evidence = EvidenceWriter(self.cfg.export.evidence_root).for_task(self.task.task_id)
             out_dir = Path(self.cfg.export.outputs_root) / self.task.task_id
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +86,7 @@ class Worker(QtCore.QThread):
             })
             self.progress_changed.emit(15)
             # 2) 生成笔记
-            generator = NoteGenerator(self.cfg, evidence, logger=logger)
+            generator = NoteGenerator(self.cfg, logger=logger)
             meta = GenerationInputMeta(video_path=self.task.video, subtitle=sub_doc, params=params)
             t1 = perf_counter()
             note = generator.generate(meta, out_dir)
