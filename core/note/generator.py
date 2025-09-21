@@ -73,7 +73,8 @@ class NoteGenerator:
             - 按字幕行号连续覆盖，禁止缺失或重叠；
             - 每个章节返回：title, start_line_no, end_line_no；
             - 章节按行号升序排列；
-            - 不做任何摘要或改写，不丢失行。
+            - 不做任何摘要或改写，不丢失行；
+            - 章节标题必须为简体中文表达，避免英文/拼音/纯时间/纯行号；如模型拟输出英文标题，请翻译为准确的中文短语。
             
             章节划分原则：
             - 仅在出现明显“主题切换”时新开章节：如引言→主体、主题/场景/对象变化、明确的枚举段落（第一/第二/…）、问答/讲解模式切换、长停顿（>1.5s）、时间/地点/人物切换等。
@@ -91,6 +92,12 @@ class NoteGenerator:
         ))
         t0 = perf_counter()
         result = self.text_llm.structured_invoke(ChaptersSchema, [sys, human], json_mode=False)
+        # 标题后置中文化校验：若极端情况下仍出现非中文标题，以“第N章”占位保证中文化
+        def _has_cjk(s: str) -> bool:
+            return any('\u4e00' <= ch <= '\u9fff' for ch in s)
+        for idx, ch in enumerate(result.chapters, start=1):
+            if not ch.title or not _has_cjk(ch.title):
+                ch.title = f"第{idx}章"
         self.logger.info("分章完成", extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter()-t0)*1000)})
         # 证据
         if self.cfg.export.save_prompts_and_raw:
@@ -101,7 +108,7 @@ class NoteGenerator:
     def _select_lines(self, items: List[SubtitleSegment], start_line: int, end_line: int) -> List[SubtitleSegment]:
         return [s for s in items if start_line <= s.line_no <= end_line]
 
-    def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment], fix_note: str | None = None) -> ParagraphsSchema:
+    def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment], fix_note: str | None = None, prev_result: ParagraphsSchema | None = None) -> ParagraphsSchema:
         sys = SystemMessage(content=dedent(
             """
             你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。
@@ -128,6 +135,12 @@ class NoteGenerator:
             f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
         )
         fix_extra = f"\n\n修正提示：{fix_note}" if fix_note else ""
+        prev_block = ""
+        if prev_result is not None:
+            # 上一轮失败的段落 JSON，用于指导本轮修正（最小变更）
+            import json as _json
+            prev_json = _json.dumps(prev_result.model_dump(), ensure_ascii=False, indent=2)
+            prev_block = f"\n\n上一轮输出（供修正，JSON）：\n{prev_json}"
         human = HumanMessage(content=dedent(
             f"""
             章节标题：{chapter_title}
@@ -136,13 +149,11 @@ class NoteGenerator:
             {content_lines}
 
             注意：严格使用以上行号，确保完整覆盖且不重叠。{fix_extra}
+            请在上一轮输出的基础上进行最小必要修改：补齐缺失行、移除重复/多余行，保持行号与时间戳与输入一致，不要改写文本，不要引入列表外行号。{prev_block}
             """
         ))
-        t0 = perf_counter()
-        # 受文本 LLM 并发限制
         with self._text_sem:
             result = self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
-        self.logger.info("分段完成", extra={"paragraphs": len(result.paragraphs), "cost_ms": int((perf_counter()-t0)*1000)})
         return result
 
     def _validate_time_coverage(self, segs: List[SubtitleSegment], paras: List[ParagraphSchema]) -> None:
@@ -232,7 +243,17 @@ class NoteGenerator:
         paragraphs: List[ParagraphSchema],
         issue: Dict[str, Any] | None = None,
     ) -> Dict[str, int]:
-        """在重试耗尽后自动修正段落的字幕行集合，使其与输入字幕一致。"""
+        """在重试耗尽后自动修正段落的字幕行集合，使其与输入字幕一致。
+
+        策略：
+        1) 去重/剔除额外行 → 仅保留来自 segs 的合法行且唯一；
+        2) 补齐缺失行 → 按时间/行号接近度分配到最合适段落（或新建段落）；
+        3) 规范化：
+           - 递归清洗空节点，行按行号排序，段落边界 = 行最小开始/最大结束；
+           - 顶层段落按最小行号排序，若时间范围重叠则合并（行集合并、边界随之更新）。
+        4) 校验前强制兜底：若仍与输入集合不一致，则“扁平化重建”为单一顶层段落，确保通过集合与覆盖校验（牺牲结构保可靠）。
+        5) 返回修正统计供审计。
+        """
         line_map: Dict[int, SubtitleSegment] = {s.line_no: s for s in segs}
         expected_ids: Set[int] = set(line_map.keys())
         assigned: Set[int] = set()
@@ -243,6 +264,8 @@ class NoteGenerator:
             "created_paragraphs": 0,
             "promoted_children": 0,
             "removed_empty": 0,
+            "merged_overlaps": 0,
+            "reconstructed_flatten": 0,
             "final_missing": 0,
             "final_extra": 0,
         }
@@ -356,7 +379,54 @@ class NoteGenerator:
 
         paragraphs[:] = finalize(paragraphs)
 
+        # 顶层段落排序并合并重叠时间范围，保证校验通过（不改变行集合）
+        def _para_min_line_no(p: ParagraphSchema) -> int:
+            return min((l.line_no for l in p.lines), default=10**9)
+
+        paragraphs.sort(key=_para_min_line_no)
+        merged: List[ParagraphSchema] = []
+        for p in paragraphs:
+            if not merged:
+                merged.append(p)
+                continue
+            prev = merged[-1]
+            if p.start_sec < prev.end_sec:
+                # 合并到上一段
+                prev.lines.extend(p.lines)
+                prev.lines.sort(key=lambda x: x.line_no)
+                prev.start_sec = min(line.start_sec for line in prev.lines)
+                prev.end_sec = max(line.end_sec for line in prev.lines)
+                prev.children = []
+                stats["merged_overlaps"] += 1
+            else:
+                merged.append(p)
+        paragraphs[:] = merged
+
         final_ids = set(collect_ids(paragraphs))
+        if final_ids != expected_ids:
+            # 兜底：扁平化重建为单一顶层段落，确保集合一致且覆盖完整
+            new_lines = [
+                ParagraphLine(
+                    line_no=s.line_no,
+                    start_sec=s.start_sec,
+                    end_sec=s.end_sec,
+                    text=s.text,
+                )
+                for s in segs
+            ]
+            if new_lines:
+                paragraphs[:] = [
+                    ParagraphSchema(
+                        title="自动合并",
+                        start_sec=min(s.start_sec for s in segs),
+                        end_sec=max(s.end_sec for s in segs),
+                        lines=new_lines,
+                        children=[],
+                    )
+                ]
+                stats["reconstructed_flatten"] = 1
+                final_ids = set(collect_ids(paragraphs))
+
         stats["final_missing"] = len(expected_ids - final_ids)
         stats["final_extra"] = len(final_ids - expected_ids)
 
@@ -412,6 +482,7 @@ class NoteGenerator:
         # 分段（业务重试，最多3次）
         max_attempts = 3
         last_issue: Dict[str, Any] | None = None
+        last_result: ParagraphsSchema | None = None
         pgs: ParagraphsSchema | None = None
         for attempt in range(1, max_attempts + 1):
             fix_note = None
@@ -431,7 +502,7 @@ class NoteGenerator:
                     parts.append("段落边界必须等于该段落所有行的最小开始与最大结束；禁止修改任何行的时间戳")
                 fix_note = "；".join(parts)
 
-            pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note)
+            pgs = self._prompt_for_paragraphs(cb.title, segs, fix_note=fix_note, prev_result=last_result)
 
             # 证据：按尝试次数归档
             if self.cfg.export.save_prompts_and_raw:
@@ -439,9 +510,11 @@ class NoteGenerator:
                     f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
                 )
                 fix_extra = f"\n\n修正提示：{fix_note}" if fix_note else ""
-                prompt_text = dedent(
+                prev_note = "（含上一轮输出与问题）" if last_result or last_issue else ""
+                from textwrap import dedent as _dedent
+                prompt_text = _dedent(
                     f"""
-                    你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。
+                    你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落。{prev_note}
                     严格要求：
                     - 覆盖所有提供的字幕行；
                     - 返回 paragraphs: 每个段落至少包含 title, start_sec, end_sec, lines；
@@ -467,12 +540,18 @@ class NoteGenerator:
                 )
                 self.evidence.write_text(f"chapters/{ci}/attempt_{attempt}/paragraphs_prompt.txt", prompt_text)
                 self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/paragraphs_result.json", pgs.model_dump())
+                if last_result is not None:
+                    self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/prev_result.json", last_result.model_dump())
+                if last_issue is not None:
+                    self.evidence.write_json(f"chapters/{ci}/attempt_{attempt}/prev_issue.json", last_issue)
 
             try:
                 self._validate_time_coverage(segs, pgs.paragraphs)
                 self.logger.info("章节校验通过", extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt})
                 break
             except Exception:
+                # 记录当前失败输出，供下一轮提示参考
+                last_result = pgs
                 issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
                 last_issue = issue
                 self.logger.info("章节校验失败，准备重试", extra={"chapter_index": ci, "attempt": attempt, **issue})
