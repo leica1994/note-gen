@@ -217,14 +217,16 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         top_left_layout.addWidget(self.file_table)
 
-        # 候选选择控制区：全选 / 全不选 / 添加到任务
+        # 候选选择控制区：全选 / 全不选 / 清空 / 添加到任务
         cand_btn_row = QtWidgets.QHBoxLayout()
         self.btn_select_all_cand = QtWidgets.QPushButton("全选")
         self.btn_deselect_all_cand = QtWidgets.QPushButton("全不选")
+        self.btn_clear_cand = QtWidgets.QPushButton("清空")
         self.btn_add_task = QtWidgets.QPushButton("添加到任务列表")
         cand_btn_row.addWidget(self.btn_select_all_cand)
         cand_btn_row.addWidget(self.btn_deselect_all_cand)
         cand_btn_row.addStretch(1)
+        cand_btn_row.addWidget(self.btn_clear_cand)
         cand_btn_row.addWidget(self.btn_add_task)
         top_left_layout.addLayout(cand_btn_row)
 
@@ -321,9 +323,23 @@ class MainWindow(QtWidgets.QMainWindow):
         # ============ 右侧：任务列表 ============
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
+        # 右侧任务表：将“错误”列改为“操作”列（内含删除按钮）
         self.table = QtWidgets.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["任务ID", "视频", "字幕", "状态", "进度%", "错误"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setHorizontalHeaderLabels(["任务ID", "视频", "字幕", "状态", "进度%", "操作"])
+        # 调整列宽策略：操作列固定窄宽，其余列合理伸缩
+        try:
+            header = self.table.horizontalHeader()
+            header.setStretchLastSection(False)
+            # 操作列（第5列）固定宽度，避免被拉伸
+            header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(5, 80)
+            # 视频与字幕列自适应填充
+            header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            # 表头文本居中
+            header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        except Exception:
+            pass
         self.table.verticalHeader().setVisible(False)
         # 更新按钮文案以匹配新行为：执行任务列表中所有“排队”任务
         self.btn_start = QtWidgets.QPushButton("开始处理任务列表")
@@ -351,6 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_add_task.clicked.connect(self._add_task)
         self.btn_select_all_cand.clicked.connect(self._select_all_candidates)
         self.btn_deselect_all_cand.clicked.connect(self._deselect_all_candidates)
+        self.btn_clear_cand.clicked.connect(self._clear_candidates)
         # 修改逻辑：点击后顺序执行所有“排队”任务，而非仅执行选中项
         self.btn_start.clicked.connect(self._start_all_pending)
         self.btn_test_llm.clicked.connect(self._test_text_llm)
@@ -495,7 +512,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if not any_checked:
             QtWidgets.QMessageBox.information(self, "提示", "请先勾选左侧候选列表中的一行或多行")
             return
+        # 1) 刷新右侧任务表
         self._refresh_table()
+        # 2) 需求变更：点击“添加到任务列表”后，应清空左侧文件列表
+        #    说明：这里直接清空候选数据源并刷新候选表格，以满足“添加后清空”的交互期望。
+        try:
+            self.candidates.clear()
+            self._refresh_candidates_table()
+        except Exception:
+            # 兜底：若刷新过程中出现异常，至少将表格行数置零，避免残留展示
+            try:
+                self.file_table.setRowCount(0)
+            except Exception:
+                pass
 
     # 文件匹配与扫描
     def _auto_match_subtitle(self, video: Path) -> Optional[Path]:
@@ -553,14 +582,69 @@ class MainWindow(QtWidgets.QMainWindow):
             self.table.setItem(i, 2, cell(t.subtitle.name))
             self.table.setItem(i, 3, cell(t.status))
             self.table.setItem(i, 4, cell(str(t.progress)))
-            self.table.setItem(i, 5, cell(t.error or ""))
+            # 操作列：删除按钮，点击后从任务列表移除该行
+            action_container = QtWidgets.QWidget()
+            action_layout = QtWidgets.QHBoxLayout(action_container)
+            action_layout.setContentsMargins(0, 0, 0, 0)
+            action_layout.setSpacing(0)
+            action_layout.addStretch(1)
+            btn_del = QtWidgets.QPushButton("删除")
+            try:
+                btn_del.setIcon(self._icon("trash"))
+            except Exception:
+                pass
+            # 捕获当前 i 作为行索引
+            btn_del.clicked.connect(lambda _=False, row=i: self._delete_task_row(row))
+            action_layout.addWidget(btn_del)
+            action_layout.addStretch(1)
+            self.table.setCellWidget(i, 5, action_container)
         # 按钮图标（样式增强，不影响逻辑）
         try:
             self.btn_start.setIcon(self._icon("play"))
             self.btn_test_llm.setIcon(self._icon("robot"))
             self.btn_test_mm.setIcon(self._icon("camera"))
+            if getattr(self, "btn_clear_cand", None):
+                self.btn_clear_cand.setIcon(self._icon("trash"))
         except Exception:
             pass
+
+    def _clear_candidates(self):
+        """清空左侧候选文件列表。"""
+        try:
+            self.candidates.clear()
+            self._refresh_candidates_table()
+        except Exception:
+            try:
+                self.file_table.setRowCount(0)
+            except Exception:
+                pass
+
+    def _delete_task_row(self, row: int):
+        """从任务列表中删除指定行。
+
+        - 若该任务正在执行，则阻止删除并提示；
+        - 删除后重建排队队列并刷新表格。
+        """
+        if row < 0 or row >= len(self.tasks):
+            return
+        # 若正在执行当前行任务，阻止删除
+        try:
+            if self.current_worker and self.current_worker.isRunning():
+                if self.tasks[row] is getattr(self.current_worker, 'task', None):
+                    QtWidgets.QMessageBox.information(self, "提示", "当前任务进行中，无法删除")
+                    return
+        except Exception:
+            pass
+        try:
+            del self.tasks[row]
+        except Exception:
+            return
+        # 删除后重建“排队”队列并刷新
+        try:
+            self.pending_queue = [i for i, t in enumerate(self.tasks) if (t.status or "").strip() == "排队"]
+        except Exception:
+            self.pending_queue = []
+        self._refresh_table()
 
     def _start_row(self, row: int):
         """启动指定行的任务（串行执行的原子操作）。
