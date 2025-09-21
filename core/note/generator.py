@@ -22,7 +22,6 @@ from core.note.models import (
     ParagraphImage,
     ParagraphSchema,
     ParagraphsSchema,
-    SelectedIndexSchema,
 )
 from core.screenshot.ffmpeg import Screenshotter
 from core.screenshot.grid import generate_grid_timestamps
@@ -222,7 +221,8 @@ class NoteGenerator:
         instruction = dedent(
             f"""
             请从下方九宫格图中选择与该段落标题与内容最匹配的一张截图。
-            要求：避免过渡帧，画面清晰稳定；返回 index 为 1..9 的整数。
+            要求：避免过渡帧，画面清晰稳定。
+            仅返回一个数字（1-9），不要任何其他字符、空格或换行；无法判断时返回 5。
             段落标题：{para.title}
             段落内容：
             {text}
@@ -230,11 +230,11 @@ class NoteGenerator:
         )
         # 受多模态 LLM 并发限制
         with self._mm_sem:
-            result = self.mm_llm.structured_choose(SelectedIndexSchema, instruction, str(grid_path))
+            chosen = self.mm_llm.choose_index(instruction, str(grid_path))
         if self.cfg.export.save_prompts_and_raw:
             self.evidence.write_text(f"chapters/{ci}/para_{pi}/choose_image_instruction.txt", instruction)
-            self.evidence.write_json(f"chapters/{ci}/para_{pi}/choose_image_result.json", result.model_dump())
-        return int(result.index)
+            self.evidence.write_text(f"chapters/{ci}/para_{pi}/choose_image_result.txt", str(chosen))
+        return int(chosen)
 
     def _convert_paragraph(self, ps: ParagraphSchema) -> Paragraph:
         lines = [

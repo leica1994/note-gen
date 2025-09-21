@@ -622,22 +622,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _test_mm_llm(self):
         try:
             from langchain_openai import ChatOpenAI
-            from pydantic import BaseModel, Field
             from langchain_core.messages import HumanMessage
 
-            class Pick(BaseModel):
-                index: int = Field(ge=1, le=1)
-
-            # 发送一个极简的“无图”请求，仅测试结构化解析（部分多模态端点也支持纯文本）
+            # 发送一个极简的纯文本请求（多数多模态端点支持纯文本）
             model = ChatOpenAI(
                 api_key=self.edit_mm_api_key.text() or None,
                 base_url=self.edit_mm_base_url.text() or None,
                 model=self.edit_mm_model.text(),
                 temperature=0,
                 timeout=30,
-            ).with_structured_output(Pick)
-            result = model.invoke([HumanMessage(content="返回 {\"index\": 1}")])
-            QtWidgets.QMessageBox.information(self, "多模态LLM", f"返回：{result.model_dump()}")
+            )
+            prompt = "请只返回一个数字（1-9），不要任何其他字符、空格或换行。若无法判断返回 5。"
+            result = model.invoke([HumanMessage(content=prompt)])
+            text = getattr(result, "content", "").strip()
+            if not text:
+                text = str(result)
+            QtWidgets.QMessageBox.information(self, "多模态LLM", f"返回：{text}")
         except Exception as e:  # noqa: BLE001
             QtWidgets.QMessageBox.critical(self, "多模态LLM错误", str(e))
 

@@ -84,3 +84,48 @@ class MultiModalLLM:
                 break
         assert last_err is not None
         raise last_err
+
+    def choose_index(self, instruction: str, image_path: str) -> int:
+        """将九宫格图与文字说明一起发送，要求模型只返回 1..9 的数字。
+
+        - 不使用结构化输出，避免多模态端点的 JSON 解析不稳定问题。
+        - 对非数字响应进行至多 3 次解析重试；HTTP/429/5xx 的退避与重试由 RetryPolicy 处理。
+        - 提示词建议在调用侧进一步强调“只返回一个数字，不要任何其他字符/空格/换行”。
+        """
+        log = logging.getLogger("note_gen.llms.mm")
+        blocks = [
+            {"type": "text", "text": instruction},
+            self._image_block(image_path),
+        ]
+        msg = HumanMessage(content=blocks)
+
+        @self._retry(classify_http_exception)
+        def _invoke_text() -> str:
+            log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path})
+            resp = self._model.invoke([msg])
+            content = getattr(resp, "content", None)
+            if isinstance(content, str):
+                return content.strip()
+            return str(content)
+
+        import re
+
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                text = _invoke_text()
+                m = re.search(r"([1-9])", text)
+                if not m:
+                    raise ValueError(f"非数字响应：{text!r}")
+                return int(m.group(1))
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                category = classify_http_exception(e)
+                if category is not None:
+                    break
+                if attempt < 3:
+                    log.info("解析数字失败，准备重试", extra={"attempt": attempt, "max": 3})
+                    continue
+                break
+        assert last_err is not None
+        raise last_err
