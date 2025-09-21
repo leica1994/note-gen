@@ -72,12 +72,6 @@ class MultiModalLLM:
                 # 装饰器已对 429/5xx/timeout 执行过退避与重试；若仍抛出则直接跳出
                 category = classify_http_exception(e)
                 if category is not None:
-                    log.error("多模态结构化调用失败（HTTP类）", extra={
-                        "attempt": attempt,
-                        "category": category,
-                        "error_cls": e.__class__.__name__,
-                        "error": str(e)[:800],
-                    })
                     break
                 # 结构化解析/校验异常重试（常见于返回带 ```json 围栏的内容）
                 msg_text = str(e)
@@ -85,24 +79,8 @@ class MultiModalLLM:
                     "json_invalid" in msg_text or "Invalid JSON" in msg_text or "validation error" in msg_text
                 )
                 if is_parse_error and attempt < 3:
-                    log.warning("多模态结构化解析失败，准备重试", extra={
-                        "attempt": attempt,
-                        "max": 3,
-                        "error_cls": e.__class__.__name__,
-                        "error": msg_text[:800],
-                    })
+                    log.info("结构化解析失败，准备重试", extra={"attempt": attempt, "max": 3})
                     continue
-                # 其他异常：记录并退出
-                log.error("多模态结构化调用失败（非HTTP/解析类）", extra={
-                    "attempt": attempt,
-                    "error_cls": e.__class__.__name__,
-                    "error": str(e)[:800],
-                })
                 break
         assert last_err is not None
-        log.error("多模态结构化调用最终失败", extra={
-            "attempts": 3,
-            "error_cls": last_err.__class__.__name__,
-            "error": str(last_err)[:1200],
-        })
         raise last_err
