@@ -438,13 +438,25 @@ class NoteGenerator:
 
         return stats
 
-    def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int) -> int:
+    def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int, subpath: str | None = None) -> int:
         text = "\n".join(f"{s.line_no}: {s.text}" for s in para.lines)
         instruction = dedent(
             f"""
-            请从下方九宫格图中选择与该段落标题与内容最匹配的一张截图。
-            要求：避免过渡帧，画面清晰稳定。
-            仅返回一个数字（1-9），不要任何其他字符、空格或换行；无法判断时返回 5。
+            任务：从九宫格（3x3，共9张）中选择最能表达本段内容的一张截图。
+
+            强制拒绝以下类型（视为过渡帧）：
+            - 交叉淡入淡出/叠化效果，画面中同时出现前后两帧元素（重影、双层文字、两张图重叠）。
+            - 明显运动模糊、拖影、未对焦、被切换动画覆盖的帧。
+            - 文字或图表被截断、被大块字幕/弹窗/菜单遮挡、窗口切换中的半透明覆盖层。
+
+            选择偏好：
+            - 画面清晰锐利、对比正常、主题居中完整；
+            - 若有K线/图表，尽量选择结构完整、无裁切、无遮挡的一张；
+            - 若多张都合格，优先选择与段落标题和字幕语义最贴合的一张；
+            - 若仍难以区分，选择信息量更高、元素更稳定的一张。
+
+            输出规范：仅返回一个阿拉伯数字（1-9），不含空格与其他字符。无法判断时返回 5。
+
             段落标题：{para.title}
             段落内容：
             {text}
@@ -454,8 +466,11 @@ class NoteGenerator:
         with self._mm_sem:
             chosen = self.mm_llm.choose_index(instruction, str(grid_path))
         if self.cfg.export.save_prompts_and_raw:
-            self.evidence.write_text(f"chapters/{ci}/para_{pi}/choose_image_instruction.txt", instruction)
-            self.evidence.write_text(f"chapters/{ci}/para_{pi}/choose_image_result.txt", str(chosen))
+            base = f"chapters/{ci}/para_{pi}"
+            if subpath:
+                base = f"{base}/{subpath}"
+            self.evidence.write_text(f"{base}/choose_image_instruction.txt", instruction)
+            self.evidence.write_text(f"{base}/choose_image_result.txt", str(chosen))
         return int(chosen)
 
     def _convert_paragraph(self, ps: ParagraphSchema) -> Paragraph:
@@ -582,15 +597,12 @@ class NoteGenerator:
         assert pgs is not None
 
         # 段落并发：截图→九宫格→多模态→高清
-        def _process_para(pi: int, ps: ParagraphSchema) -> Paragraph:
-            # 递归转换
-            para = self._convert_paragraph(ps)
+        def _decorate_with_images(para: Paragraph, base_dir: Path, label: str | None = None, para_index: int | None = None) -> None:
             # 生成九宫格并选择
             timestamps = generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
-            thumbs_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "thumbs"
-            grid_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "grid.jpg"
+            thumbs_dir = base_dir / "thumbs"
+            grid_path = base_dir / "grid.jpg"
             t_s = perf_counter()
-            # 优先使用“一次 ffmpeg 产出九宫格”（失败时回退到旧方案）
             try:
                 with self._thumb_sem:
                     self.screenshotter.compose_grid_one_shot(
@@ -604,7 +616,8 @@ class NoteGenerator:
                 # 回退方案：逐帧缩略图 + PIL 拼图
                 self.logger.info("一把流九宫格失败，将回退逐帧", extra={
                     "chapter_index": ci,
-                    "para_index": pi,
+                    "para_index": para_index or 0,
+                    "sub_index": label or "",
                     "error": str(e),
                 })
                 with self._thumb_sem:
@@ -612,20 +625,22 @@ class NoteGenerator:
                     self.screenshotter.compose_grid(thumbs, grid_path)
             self.logger.info("生成九宫格完成", extra={
                 "chapter_index": ci,
-                "para_index": pi,
+                "para_index": para_index or 0,
+                "sub_index": label or "",
                 "grid": str(grid_path),
                 "cost_ms": int((perf_counter()-t_s)*1000),
             })
-            chosen_idx = self._choose_best_frame(para, grid_path, ci, pi)
+            chosen_idx = self._choose_best_frame(para, grid_path, ci, para_index or 0, subpath=label)
             chosen_ts = timestamps[chosen_idx - 1]
             # 高清重拍
-            hi_path = task_out_dir / f"chapter_{ci}" / f"para_{pi}" / "hi.jpg"
+            hi_path = base_dir / "hi.jpg"
             t_hq = perf_counter()
             with self._shot_sem:
                 self.screenshotter.capture_high_quality(Path(meta.video_path), chosen_ts, hi_path)
             self.logger.info("高清重拍完成", extra={
                 "chapter_index": ci,
-                "para_index": pi,
+                "para_index": para_index or 0,
+                "sub_index": label or "",
                 "chosen_index": chosen_idx,
                 "timestamp_sec": chosen_ts,
                 "hi_image": str(hi_path),
@@ -638,6 +653,19 @@ class NoteGenerator:
                 chosen_timestamp_sec=chosen_ts,
                 hi_res_image_path=hi_path,
             )
+
+            # 递归处理子段落（在父段落任务内顺序执行，避免爆炸并发）
+            if para.children:
+                for si, child in enumerate(para.children, start=1):
+                    child_dir = base_dir / f"sub_{si}"
+                    sub_label = f"{label}/sub_{si}" if label else f"sub_{si}"
+                    _decorate_with_images(child, child_dir, sub_label, para_index=para_index)
+
+        def _process_para(pi: int, ps: ParagraphSchema) -> Paragraph:
+            # 递归转换
+            para = self._convert_paragraph(ps)
+            base_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}"
+            _decorate_with_images(para, base_dir, None, para_index=pi)
             return para
 
         paragraphs: List[Paragraph] = [None] * len(pgs.paragraphs)  # type: ignore[list-item]

@@ -42,6 +42,11 @@ class ScreenshotConfig(BaseModel):
     grid_rows: int = Field(default=3, description="九宫格行数")
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
     include_endpoints: bool = Field(default=True, description="九宫格是否包含区间两端点")
+    # 为降低“过渡帧/淡入淡出”被选中的概率，在生成九宫格时间点时对区间首尾预留边缘安全距离。
+    # 说明：
+    # - 该值表示在 [start, end] 区间两端各向内收缩的秒数；
+    # - 实际使用时会与区间长度联动，避免区间过短导致无法取满帧。
+    edge_margin_sec: float = Field(default=0.5, ge=0.0, description="时间点生成的首尾边缘留白（秒）")
     max_workers: int = Field(default=1, ge=1, le=64, description="截图/段落处理并发数（固定串行建议设为1）")
     # 硬件加速（可选）：例如 cuda/qsv/dxva2/d3d11va/vaapi 等；默认不启用
     hwaccel: Optional[str] = Field(default=None, description="ffmpeg -hwaccel 参数（如 cuda/qsv/dxva2/vaapi），默认 None 关闭")
