@@ -6,7 +6,7 @@ from pathlib import Path
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from core.config.schema import MultiModalConfig
 from core.utils.retry import RetryPolicy, classify_http_exception
@@ -62,4 +62,25 @@ class MultiModalLLM:
             log.info("调用多模态 LLM（结构化输出）", extra={"schema": schema.__name__, "image": image_path})
             return model_with_schema.invoke([msg])  # type: ignore[return-value]
 
-        return _invoke()
+        # 外层增加结构化解析容错重试（最多 3 次）；HTTP 类错误的重试由装饰器处理
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                return _invoke()
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                # 装饰器已对 429/5xx/timeout 执行过退避与重试；若仍抛出则直接跳出
+                category = classify_http_exception(e)
+                if category is not None:
+                    break
+                # 结构化解析/校验异常重试（常见于返回带 ```json 围栏的内容）
+                msg_text = str(e)
+                is_parse_error = isinstance(e, ValidationError) or (
+                    "json_invalid" in msg_text or "Invalid JSON" in msg_text or "validation error" in msg_text
+                )
+                if is_parse_error and attempt < 3:
+                    log.info("结构化解析失败，准备重试", extra={"attempt": attempt, "max": 3})
+                    continue
+                break
+        assert last_err is not None
+        raise last_err

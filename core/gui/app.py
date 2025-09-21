@@ -133,6 +133,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 任务与候选文件对
         self.current_worker: Optional[Worker] = None
         self.tasks: list[TaskItem] = []
+        # 顺序执行队列：保存“排队”状态任务的行索引，点击开始后依次串行处理
+        self.pending_queue: list[int] = []
         self.candidates: list[tuple[Path, Path]] = []  # 左侧候选“视频-字幕”对（仅界面列表，不触发处理）
 
         self._build_ui()
@@ -276,7 +278,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table.setHorizontalHeaderLabels(["任务ID", "视频", "字幕", "状态", "进度%", "错误"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
-        self.btn_start = QtWidgets.QPushButton("开始处理选中任务")
+        # 更新按钮文案以匹配新行为：执行任务列表中所有“排队”任务
+        self.btn_start = QtWidgets.QPushButton("开始处理任务列表")
         right_layout.addWidget(self.table)
         right_layout.addWidget(self.btn_start)
 
@@ -293,7 +296,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_add_task.clicked.connect(self._add_task)
         self.btn_select_all_cand.clicked.connect(self._select_all_candidates)
         self.btn_deselect_all_cand.clicked.connect(self._deselect_all_candidates)
-        self.btn_start.clicked.connect(self._start_selected)
+        # 修改逻辑：点击后顺序执行所有“排队”任务，而非仅执行选中项
+        self.btn_start.clicked.connect(self._start_all_pending)
         self.btn_test_llm.clicked.connect(self._test_text_llm)
         self.btn_test_mm.clicked.connect(self._test_mm_llm)
         # 参数变更自动保存（防抖）
@@ -469,12 +473,15 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _start_selected(self):
-        row = self.table.currentRow()
+    def _start_row(self, row: int):
+        """启动指定行的任务（串行执行的原子操作）。
+
+        保持最小变更：复用原有选中项启动逻辑，仅将行索引作为参数传入。
+        """
         if row < 0 or row >= len(self.tasks):
             return
         if self.current_worker and self.current_worker.isRunning():
-            QtWidgets.QMessageBox.information(self, "提示", "已有任务进行中，请稍后")
+            # 已有任务进行中，由队列驱动下一个，不在此重复启动
             return
         task = self.tasks[row]
         # 启动前保存一次最新配置
@@ -486,6 +493,37 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.status_changed.connect(lambda s: self._on_status(row, s))
         worker.finished_with_result.connect(lambda st, err: self._on_finish(row, st, err))
         worker.start()
+
+    def _start_all_pending(self):
+        """收集并顺序执行所有“排队”任务。
+
+        - 若当前有任务在执行：仅重置/填充队列，等待当前完成后自动继续；
+        - 若无任务在执行：立即启动队列第一个并串行推进。
+        """
+        # 收集当前“排队”任务的行索引，按列表顺序执行
+        self.pending_queue = [i for i, t in enumerate(self.tasks) if (t.status or "").strip() == "排队"]
+        if not self.pending_queue:
+            QtWidgets.QMessageBox.information(self, "提示", "没有需要处理的待处理任务（状态为“排队”）")
+            return
+
+        if self.current_worker and self.current_worker.isRunning():
+            # 当前正在执行，等待完成后在 _on_finish 中继续
+            QtWidgets.QMessageBox.information(self, "提示", "已有任务进行中，已更新队列，完成后将继续执行剩余任务")
+            return
+
+        # 立即启动队列中的第一个
+        self._start_next_in_queue()
+
+    def _start_next_in_queue(self):
+        """启动队列中的下一个“排队”任务。若队列为空则结束。"""
+        # 清理无效索引或非排队项
+        while self.pending_queue:
+            row = self.pending_queue.pop(0)
+            if 0 <= row < len(self.tasks) and (self.tasks[row].status or "").strip() == "排队":
+                self._start_row(row)
+                return
+        # 队列耗尽，无需处理
+        return
 
     # 选择控制
     def _select_all_candidates(self):
@@ -548,6 +586,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tasks[row].error = error
         self._refresh_table()
         self.current_worker = None
+        # 若存在待执行队列，则继续下一个任务
+        self._start_next_in_queue()
 
     def closeEvent(self, event):  # type: ignore[override]
         # 关闭窗口时尝试保存一次配置（静默，失败也不阻塞关闭）

@@ -26,12 +26,29 @@ class JsonFormatter(logging.Formatter):
         }
         # 合并额外字段（extra）
         for k, v in record.__dict__.items():
-            if k in {"args", "msg", "name", "levelno", "levelname", "created", "msecs", "relativeCreated", "pathname", "filename", "module", "lineno", "funcName", "exc_info", "exc_text", "stack_info", "thread", "threadName", "processName", "process"}:
+            # 过滤标准字段与 asyncio 注入的 taskName（避免恒为 null 干扰阅读）
+            if k in {"args", "msg", "name", "levelno", "levelname", "created", "msecs", "relativeCreated", "pathname", "filename", "module", "lineno", "funcName", "exc_info", "exc_text", "stack_info", "thread", "threadName", "processName", "process", "taskName"}:
                 continue
             # 跳过内部记录属性，仅保留用户 extra
             if k.startswith("_"):
                 continue
             payload[k] = v
+
+        # 若未显式提供 task_id，则尝试从 logger 名称中提取（note_gen.task.{task_id}[.child...]）
+        try:
+            if "task_id" not in payload and isinstance(record.name, str):
+                prefix = "note_gen.task."
+                if record.name.startswith(prefix):
+                    rest = record.name[len(prefix):]
+                    task_id = rest.split(".")[0] if rest else None
+                    if task_id:
+                        payload["task_id"] = task_id
+        except Exception:
+            # 提取失败不影响原始日志
+            pass
+        # 为兼容期望字段，若存在 task_id 则补充 taskName（避免外部读取到 null）
+        if "task_id" in payload and "taskName" not in payload:
+            payload["taskName"] = payload["task_id"]
         return json.dumps(payload, ensure_ascii=False)
 
 
