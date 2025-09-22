@@ -25,7 +25,14 @@ class TextLLM:
             max_tokens=cfg.max_tokens,
             timeout=cfg.request_timeout,
         )
-        self._retry = RetryPolicy(max_retries=3)
+        # 提升 LLM 查询的失败重试次数：
+        # - 429（限流）：由原来的 3 次提升到 5 次（遵循合规退避 20s）
+        # - 5xx/timeout：仍保持最多 1 次重试（退避 2s）
+        # 说明：仅提升 LLM 相关重试次数，不影响其他模块（如 FFmpeg）。
+        self._retry = RetryPolicy(
+            max_retries=5,
+            category_max={"429": 5, "5xx": 1, "timeout": 1},
+        )
 
     def structured_invoke(self, schema: Type[T], prompt_messages: list, json_mode: bool = False) -> T:
         """以结构化输出方式执行调用。
