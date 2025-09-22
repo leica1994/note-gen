@@ -567,7 +567,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.file_table.setItem(i, 3, cell(str(v.parent)))
 
     def _add_task(self):
-        """将左侧候选表中勾选的行添加到右侧任务列表。"""
+        """将左侧候选表中勾选的行添加到右侧任务列表，并仅从候选列表删除已勾选的行。"""
+        selected_rows: list[int] = []
         any_checked = False
         for row in range(self.file_table.rowCount()):
             cw = self.file_table.cellWidget(row, 0)
@@ -576,25 +577,28 @@ class MainWindow(QtWidgets.QMainWindow):
             cb = cw.findChild(QtWidgets.QCheckBox, "candCheck")
             if cb and cb.isChecked():
                 any_checked = True
+                selected_rows.append(row)
                 try:
                     v, s = self.candidates[row]
                     self.tasks.append(TaskItem(video=v, subtitle=s))
                 except Exception:
+                    # 忽略越界或数据不一致的异常，继续处理其它行
                     continue
         if not any_checked:
             QtWidgets.QMessageBox.information(self, "提示", "请先勾选左侧候选列表中的一行或多行")
             return
         # 1) 刷新右侧任务表
         self._refresh_table()
-        # 2) 需求变更：点击“添加到任务列表”后，应清空左侧文件列表
-        #    说明：这里直接清空候选数据源并刷新候选表格，以满足“添加后清空”的交互期望。
+        # 2) 仅从候选列表删除已勾选的行（自底向上避免索引错位）
         try:
-            self.candidates.clear()
+            for idx in sorted(selected_rows, reverse=True):
+                if 0 <= idx < len(self.candidates):
+                    self.candidates.pop(idx)
             self._refresh_candidates_table()
         except Exception:
-            # 兜底：若刷新过程中出现异常，至少将表格行数置零，避免残留展示
+            # 兜底：若刷新过程中出现异常，至少将表格行数校正为当前候选数
             try:
-                self.file_table.setRowCount(0)
+                self.file_table.setRowCount(len(self.candidates))
             except Exception:
                 pass
 
