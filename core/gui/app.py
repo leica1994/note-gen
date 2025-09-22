@@ -993,10 +993,13 @@ class MainWindow(QtWidgets.QMainWindow):
             from langchain_openai import ChatOpenAI
             from pydantic import BaseModel, Field
             from langchain_core.messages import HumanMessage
+            from time import perf_counter
 
             class Ping(BaseModel):
                 ok: bool = Field(description="是否连通")
 
+            # 记录耗时与上下文信息（注意脱敏展示 api_key）
+            t0 = perf_counter()
             model = ChatOpenAI(
                 api_key=self.edit_api_key.text() or None,
                 base_url=self.edit_base_url.text() or None,
@@ -1005,16 +1008,45 @@ class MainWindow(QtWidgets.QMainWindow):
                 timeout=30,
             ).with_structured_output(Ping)
             result = model.invoke([HumanMessage(content="返回 {\"ok\": true}")])
-            QtWidgets.QMessageBox.information(self, "文本LLM", f"返回：{result.model_dump()}")
+            cost_ms = int((perf_counter() - t0) * 1000)
+            # 弹框：清晰展示核心配置（脱敏）与耗时、结果
+            api_key = (self.edit_api_key.text() or "").strip()
+            masked_key = (api_key[:3] + "*" * max(0, len(api_key) - 5) + api_key[-2:]) if api_key else "-"
+            base_url = (self.edit_base_url.text() or "默认（SDK 内置）").strip()
+            model_name = (self.edit_model.text() or "-").strip()
+            body = (
+                f"连通成功\n\n"
+                f"模型：{model_name}\n"
+                f"Base URL：{base_url}\n"
+                f"API Key（已脱敏）：{masked_key}\n"
+                f"耗时：{cost_ms} ms\n"
+                f"结构化返回：{result.model_dump()}\n"
+            )
+            QtWidgets.QMessageBox.information(self, "文本LLM连通成功", body)
         except Exception as e:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "文本LLM错误", str(e))
+            # 失败时提供最常见排障建议，避免重复询问
+            api_key = (self.edit_api_key.text() or "").strip()
+            masked_key = (api_key[:3] + "*" * max(0, len(api_key) - 5) + api_key[-2:]) if api_key else "-"
+            base_url = (self.edit_base_url.text() or "默认（SDK 内置）").strip()
+            model_name = (self.edit_model.text() or "-").strip()
+            hint = (
+                f"连通失败：{str(e)}\n\n"
+                f"请检查：\n"
+                f"- Base URL 是否可达（当前：{base_url}）\n"
+                f"- API Key 是否正确（已脱敏：{masked_key}）\n"
+                f"- 模型名是否存在/可用（当前：{model_name}）\n"
+                f"- 网络代理/证书/网关路径（如是否需要 /v1 前缀）\n"
+            )
+            QtWidgets.QMessageBox.critical(self, "文本LLM连通失败", hint)
 
     def _test_mm_llm(self):
         try:
             from langchain_openai import ChatOpenAI
             from langchain_core.messages import HumanMessage
+            from time import perf_counter
 
             # 发送一个极简的纯文本请求（多数多模态端点支持纯文本）
+            t0 = perf_counter()
             model = ChatOpenAI(
                 api_key=self.edit_mm_api_key.text() or None,
                 base_url=self.edit_mm_base_url.text() or None,
@@ -1024,12 +1056,39 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             prompt = "请只返回一个数字（1-9），不要任何其他字符、空格或换行。若无法判断返回 5。"
             result = model.invoke([HumanMessage(content=prompt)])
+            cost_ms = int((perf_counter() - t0) * 1000)
             text = getattr(result, "content", "").strip()
             if not text:
                 text = str(result)
-            QtWidgets.QMessageBox.information(self, "多模态LLM", f"返回：{text}")
+            # 弹框：展示核心配置（脱敏）与耗时、返回节选
+            api_key = (self.edit_mm_api_key.text() or "").strip()
+            masked_key = (api_key[:3] + "*" * max(0, len(api_key) - 5) + api_key[-2:]) if api_key else "-"
+            base_url = (self.edit_mm_base_url.text() or "默认（SDK 内置）").strip()
+            model_name = (self.edit_mm_model.text() or "-").strip()
+            body = (
+                f"连通成功\n\n"
+                f"模型：{model_name}\n"
+                f"Base URL：{base_url}\n"
+                f"API Key（已脱敏）：{masked_key}\n"
+                f"耗时：{cost_ms} ms\n"
+                f"返回样例：{text}"
+            )
+            QtWidgets.QMessageBox.information(self, "多模态LLM连通成功", body)
         except Exception as e:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "多模态LLM错误", str(e))
+            api_key = (self.edit_mm_api_key.text() or "").strip()
+            masked_key = (api_key[:3] + "*" * max(0, len(api_key) - 5) + api_key[-2:]) if api_key else "-"
+            base_url = (self.edit_mm_base_url.text() or "默认（SDK 内置）").strip()
+            model_name = (self.edit_mm_model.text() or "-").strip()
+            hint = (
+                f"连通失败：{str(e)}\n\n"
+                f"请检查：\n"
+                f"- Base URL 是否可达（当前：{base_url}）\n"
+                f"- API Key 是否正确（已脱敏：{masked_key}）\n"
+                f"- 模型名是否存在/可用（当前：{model_name}）\n"
+                f"- 端点是否支持纯文本消息，或是否需改用多模态输入\n"
+                f"- 网络代理/证书/网关路径（如是否需要 /v1 前缀）\n"
+            )
+            QtWidgets.QMessageBox.critical(self, "多模态LLM连通失败", hint)
 
     # 样式与资源
     def _icon(self, name: str) -> QtGui.QIcon:
