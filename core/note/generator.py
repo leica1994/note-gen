@@ -108,7 +108,8 @@ class NoteGenerator:
         ))
         human = HumanMessage(content=dedent(
             f"""
-            以下是完整字幕（包含行号与时间戳）。请基于这些“已出现的行号”给出章节边界。
+            目标：将下面的完整字幕（包含行号与时间戳）按“内容导向”拆分为文章章节（非等距、非机械平均）。
+            请仅基于“已出现的行号”给出章节边界，并严格遵守系统约束与输出格式。
 
             合法行号范围：{_min_line_no} - {_max_line_no}
             字幕总行数：{_total_lines}
