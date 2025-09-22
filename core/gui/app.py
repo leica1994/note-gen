@@ -211,7 +211,7 @@ class MainWindow(QtWidgets.QMainWindow):
         重构布局（仅GUI样式与组织，不改变参数与处理逻辑）：
         - 整体左右布局：右侧为任务列表；左侧再拆分为上下布局。
         - 左上：文件/文件夹选择 + 候选文件对列表 + “添加到右侧任务列表”。
-        - 左下：参数配置，分为两个标签页（AI参数配置、笔记参数配置）。
+        - 左下：参数配置，分为三个标签页（文本LLM、多模态LLM、笔记参数配置）。
         """
         # 顶层水平分割：左（输入与参数） | 右（任务列表）
         root_splitter = QtWidgets.QSplitter()
@@ -288,9 +288,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # ============ 左下：参数Tabs ============
         bottom_tabs = QtWidgets.QTabWidget()
 
-        # --- AI参数配置 ---
-        tab_ai = QtWidgets.QWidget()
-        cfg_layout = QtWidgets.QFormLayout(tab_ai)
+        # --- 文本LLM 参数配置 ---
+        tab_text_llm = QtWidgets.QWidget()
+        text_layout = QtWidgets.QFormLayout(tab_text_llm)
+        # 复用现有控件实例，保持变量名不变，避免影响保存/信号逻辑
         self.edit_base_url = QtWidgets.QLineEdit(self.cfg.text_llm.base_url or "")
         self.edit_api_key = QtWidgets.QLineEdit(self.cfg.text_llm.api_key or "")
         self.edit_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
@@ -309,6 +310,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_text_conc.setValue(self.cfg.text_llm.concurrency)
         self.btn_test_llm = QtWidgets.QPushButton("测试文本LLM连通性")
 
+        text_layout.addRow("文本LLM base_url", self.edit_base_url)
+        text_layout.addRow("文本LLM api_key", self.edit_api_key)
+        text_layout.addRow("文本LLM model", self.edit_model)
+        text_layout.addRow("文本LLM max_tokens", self.spin_text_max_tokens)
+        text_layout.addRow("文本LLM并发", self.spin_text_conc)
+        text_layout.addRow(self.btn_test_llm)
+        bottom_tabs.addTab(tab_text_llm, "文本LLM")
+
+        # --- 多模态LLM 参数配置 ---
+        tab_mm_llm = QtWidgets.QWidget()
+        mm_layout = QtWidgets.QFormLayout(tab_mm_llm)
         self.edit_mm_base_url = QtWidgets.QLineEdit(self.cfg.mm_llm.base_url or "")
         self.edit_mm_api_key = QtWidgets.QLineEdit(self.cfg.mm_llm.api_key or "")
         self.edit_mm_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
@@ -327,23 +339,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_mm_conc.setValue(self.cfg.mm_llm.concurrency)
         self.btn_test_mm = QtWidgets.QPushButton("测试多模态LLM连通性")
 
-        cfg_layout.addRow("文本LLM base_url", self.edit_base_url)
-        cfg_layout.addRow("文本LLM api_key", self.edit_api_key)
-        cfg_layout.addRow("文本LLM model", self.edit_model)
-        # 将 max_tokens 放在并发之前
-        cfg_layout.addRow("文本LLM max_tokens", self.spin_text_max_tokens)
-        cfg_layout.addRow("文本LLM并发", self.spin_text_conc)
-        cfg_layout.addRow(self.btn_test_llm)
-        cfg_layout.addRow(QtWidgets.QLabel("——"))
-        cfg_layout.addRow("多模态 base_url", self.edit_mm_base_url)
-        cfg_layout.addRow("多模态 api_key", self.edit_mm_api_key)
-        cfg_layout.addRow("多模态 model", self.edit_mm_model)
-        # 将 max_tokens 放在并发之前
-        cfg_layout.addRow("多模态 max_tokens", self.spin_mm_max_tokens)
-        cfg_layout.addRow("多模态并发", self.spin_mm_conc)
-        cfg_layout.addRow(self.btn_test_mm)
+        mm_layout.addRow("多模态 base_url", self.edit_mm_base_url)
+        mm_layout.addRow("多模态 api_key", self.edit_mm_api_key)
+        mm_layout.addRow("多模态 model", self.edit_mm_model)
+        mm_layout.addRow("多模态 max_tokens", self.spin_mm_max_tokens)
+        mm_layout.addRow("多模态并发", self.spin_mm_conc)
+        mm_layout.addRow(self.btn_test_mm)
 
-        bottom_tabs.addTab(tab_ai, "AI参数配置")
+        bottom_tabs.addTab(tab_mm_llm, "多模态LLM")
 
         # --- 笔记参数配置 ---
         tab_note = QtWidgets.QWidget()
