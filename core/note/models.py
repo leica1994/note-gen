@@ -63,7 +63,9 @@ class ParagraphLine(BaseModel):
     line_no: int
     start_sec: float
     end_sec: float
-    text: str
+    # 为降低 LLM 输出体量，允许 text 缺省为空字符串；
+    # 在字幕模式下由生成器按 line_no 本地回填原文。
+    text: str = Field(default="")
 
 
 class ParagraphSchema(BaseModel):

@@ -277,9 +277,10 @@ class NoteGenerator:
             3) 边界=行集合：任一段落 start_sec = 其 lines.start_sec 的最小值；end_sec = 其 lines.end_sec 的最大值；
                段落中每一行的 [start_sec,end_sec] 必须落在该段落边界之内（容差 ≤ 0.05s）。
             4) 子层级：本任务禁止生成子段；children 必须始终为 []（不要返回 null 或 {}）。
-            5) 排序与结构：段落按时间升序；lines 按行号升序；保留原文 text，不要改写。
+            5) 排序与结构：段落按时间升序；lines 按行号升序。
             6) 输出契约：仅返回 JSON 对象，键为 paragraphs；每个段落包含 {title, start_sec, end_sec, lines, children, optimized}；
                其中 lines 每项为 {line_no, start_sec, end_sec, text}；children 必为 []；optimized 为 List[str]。
+               为降低输出体量，lines.*.text 一律返回空字符串 ""（不要回传原文，程序将按行号本地回填）。
 
             内省自检（输出前在你内部完成，不要打印过程）：
             - 行号校验：收集所有段落 lines 的 line_no 集合，应与输入全集完全相等；计数 Σ(唯一行) = total_lines；重复=0；缺失=0；额外=0。
@@ -639,12 +640,29 @@ class NoteGenerator:
         # 证据归档移除
         return int(chosen)
 
-    def _convert_paragraph(self, ps: ParagraphSchema) -> Paragraph:
-        lines = [
-            SubtitleSegment(line_no=l.line_no, start_sec=l.start_sec, end_sec=l.end_sec, text=l.text)
-            for l in ps.lines
-        ]
-        children = [self._convert_paragraph(c) for c in ps.children] if ps.children else []
+    def _convert_paragraph(
+        self,
+        ps: ParagraphSchema,
+        line_lookup: Dict[int, SubtitleSegment] | None = None,
+        backfill_text: bool = False,
+    ) -> Paragraph:
+        """将分段 Schema 转换为运行期模型。
+
+        - 当 backfill_text=True（字幕模式）时，若行的 text 为空，则按 line_no 从 line_lookup 回填字幕原文；
+        - 当 backfill_text=False（AI 笔记模式）时，保持 text 为空即可（后续不使用原文）。
+        """
+        lines: List[SubtitleSegment] = []
+        for l in ps.lines:
+            txt = l.text or ""
+            if backfill_text and (not txt):
+                if line_lookup is not None:
+                    seg = line_lookup.get(l.line_no)
+                    if seg is not None:
+                        txt = seg.text
+            lines.append(
+                SubtitleSegment(line_no=l.line_no, start_sec=l.start_sec, end_sec=l.end_sec, text=txt)
+            )
+        children = [self._convert_paragraph(c, line_lookup, backfill_text) for c in ps.children] if ps.children else []
         return Paragraph(
             title=ps.title,
             start_sec=ps.start_sec,
@@ -839,7 +857,13 @@ class NoteGenerator:
 
         def _process_para(pi: int, ps: ParagraphSchema) -> Paragraph:
             # 递归转换
-            para = self._convert_paragraph(ps)
+            # 按 GUI 选择的笔记模式决定是否回填原文：
+            # - 字幕模式（subtitle）：回填 text
+            # - AI 笔记模式（optimized）：不回填 text，保持为空
+            mode = getattr(getattr(self.cfg, "note", None), "mode", "subtitle")
+            backfill = (mode == "subtitle")
+            line_lookup = {s.line_no: s for s in segs}
+            para = self._convert_paragraph(ps, line_lookup=line_lookup, backfill_text=backfill)
             base_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}"
             _decorate_with_images(para, base_dir, None, para_index=pi)
             return para
