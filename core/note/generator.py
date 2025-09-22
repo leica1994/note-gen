@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from textwrap import dedent
 from time import perf_counter
@@ -252,10 +252,11 @@ class NoteGenerator:
         return [s for s in items if start_line <= s.line_no <= end_line]
 
     def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphsSchema:
-        """让文本 LLM 基于给定字幕片段生成分段结构（不引用历史输出）。
+        """基于给定字幕片段生成“段落”结构（仅顶层段落，不生成子段）。
 
-        优化后的提示词强调：行号集合一致性、时间覆盖完整与不重叠、边界=行集合的最小/最大时间、
-        子层级约束、自检清单与回退为单段策略，降低后续校验失败概率。
+        设计动机：分章提示的遵循性好在于约束明确且结构简单。本提示收紧分段任务边界，
+        明确“禁止生成 children（必须为 []）”，并强化行号集合/时间覆盖/边界一致性等硬性约束，
+        结合回退策略，降低校验失败概率。
         """
         # 计算本章节的行号与时间范围，帮助模型自检
         _min_line = min(s.line_no for s in segs) if segs else 0
@@ -266,35 +267,36 @@ class NoteGenerator:
 
         sys = SystemMessage(content=dedent(
             """
-            你是一名专业的结构化编辑，任务是将给定章节内的字幕行分级成段落，并为每个（含子层级）段落生成 optimized。
+            你是一名专业的结构化编辑，任务是将给定章节内的字幕行划分为“顶层段落”（禁止生成子段落），并为每个段落生成 optimized。
 
-            严格要求（必须全部满足）：
-            1) 行号一致性：仅使用提供列表中真实出现的行号；每个行号必须且仅出现一次；不得遗漏、不得重复、不得引入列表外行号。
-            2) 顶层时间覆盖：顶层段落按时间升序排列且互不重叠，联合完整覆盖章节时间范围 [min_sec, max_sec]。
-               - 相邻顶层段落应时间相接：start_sec(i) ≈ end_sec(i-1)，容差 ≤ 0.05s；不得出现空洞或交叉。
-            3) 边界=行集合：任一段落的 start_sec = 其 lines.start_sec 的最小值；end_sec = 其 lines.end_sec 的最大值；
-               段落中每一行的 [start_sec,end_sec] 必须落在该段落的时间边界之内（容差 ≤ 0.05s）。
-            4) 子层级：子段落必须在父段落时间范围内，满足与父段落相同的行号与时间约束；若没有子段落，children 返回空数组 []，不要返回 null 或 {}。
-            5) 排序与结构：同级段落按时间升序；lines 按行号升序；保持原文 text，不要改写。
+            硬性约束（必须全部满足）：
+            1) 行号一致性与连续性：仅使用输入列表中真实出现的行号；每个行号必须且仅出现一次；
+               全体行号（所有段落 lines 的并集）按升序应构成从“最小行号”到“最大行号”的连续整数序列（无间断、无缺失、无重复、无额外）。
+            2) 顶层时间覆盖：顶层段落按时间升序且不重叠，联合完整覆盖章节时间范围 [min_sec, max_sec]（容差 ≤ 0.05s）。
+               - 相邻段落应时间相接：start_sec(i) ≈ end_sec(i-1)；不得出现空洞或交叉。
+            3) 边界=行集合：任一段落 start_sec = 其 lines.start_sec 的最小值；end_sec = 其 lines.end_sec 的最大值；
+               段落中每一行的 [start_sec,end_sec] 必须落在该段落边界之内（容差 ≤ 0.05s）。
+            4) 子层级：本任务禁止生成子段；children 必须始终为 []（不要返回 null 或 {}）。
+            5) 排序与结构：段落按时间升序；lines 按行号升序；保留原文 text，不要改写。
             6) 输出契约：仅返回 JSON 对象，键为 paragraphs；每个段落包含 {title, start_sec, end_sec, lines, children, optimized}；
-               lines 中每项为 {line_no, start_sec, end_sec, text}；optimized 为字符串列表 List[str]。
+               其中 lines 每项为 {line_no, start_sec, end_sec, text}；children 必为 []；optimized 为 List[str]。
 
             内省自检（输出前在你内部完成，不要打印过程）：
-            - 行号校验：收集所有段落（含子层级）lines 的 line_no，集合应与输入行号集合完全相等；计数 Σ(唯一行) = total_lines；重复数=0；缺失数=0；额外=0。
+            - 行号校验：收集所有段落 lines 的 line_no 集合，应与输入全集完全相等；计数 Σ(唯一行) = total_lines；重复=0；缺失=0；额外=0。
+            - 连续性校验：将并集按升序排序，任意相邻行号的差值恒为 1（连续数列）。
             - 时间校验：
               a) 顶层段落的时间范围按升序且不重叠；
-              b) 顶层覆盖：第一个段落 start_sec ≈ min_sec；最后一个段落 end_sec ≈ max_sec（容差 ≤ 0.05s）；
-              c) 段落边界=其 lines 的最小开始/最大结束；所有行时间落入其段落边界；
-              d) 子段落均在父段落边界内且满足 a)~c)。
+              b) 顶层覆盖：第一个段落 start_sec ≈ min_sec；最后一个段落 end_sec ≈ max_sec；
+              c) 段落边界=其 lines 的最小开始/最大结束；所有行时间落入其段落边界。
 
             回退策略：若任一检查未通过，则仅返回 1 个顶层段落：
             - title："整体内容概览"
             - start_sec=min_sec, end_sec=max_sec
-            - lines：包含全部行（按行号升序），每行的时间/文本与输入完全一致
+            - lines：包含全部行（按行号升序），每行时间/文本与输入完全一致
             - children=[]；optimized 可生成 1~N 条，保持不捏造事实
 
             optimized 说明：
-            - 为每个（含子层级）段落生成 optimized（List[str]）：去除语气词、添加合理标点后，拼接成流畅句子；
+            - 为每个段落生成 optimized（List[str]）：去除语气词、添加合理标点后，拼接成流畅句子；
             - 内容较长可自然分段；可使用 Markdown 标记重点（如 **加粗**、`行内代码`、列表等）；
             - 严禁捏造未出现于该段落字幕中的事实；保留术语与数字的准确性与时序逻辑。
             """
@@ -302,6 +304,7 @@ class NoteGenerator:
         content_lines = "\n".join(
             f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
         )
+        allowed_ids = "[" + ", ".join(str(s.line_no) for s in segs) + "]"
         human = HumanMessage(content=dedent(
             f"""
             章节标题：{chapter_title}
@@ -309,86 +312,15 @@ class NoteGenerator:
             本章节字幕总行数：{_total_lines}
             本章节时间范围：[{_min_sec:.3f} - {_max_sec:.3f}]
 
-            请严格使用下方列表中“已出现的行号”进行分段；不得使用未出现的行号；必须全量覆盖且不重叠；
-            段落边界应等于其行集合的最小开始/最大结束；若无法满足规则，请按回退策略输出单段结构。
+            合法行号全集 S：{allowed_ids}
+            注：S 为从 {_min_line} 到 {_max_line} 的连续整数集合。
+            要求：仅可使用 S 中的行号；并且对所有段落 lines 的并集需“连续、无重复、无缺失、无额外”；
+            段落之间时间不重叠且完整覆盖范围；禁止生成子段（children 必须为 []）。
+            段落边界应等于其 lines 的最小开始/最大结束；若无法满足全部硬性校验，请按回退策略输出单段结构。
 
             {content_lines}
             """
         ))
-        with self._text_sem:
-            result = self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
-        return result
-
-    def _prompt_for_paragraphs_with_feedback(
-        self,
-        chapter_title: str,
-        segs: List[SubtitleSegment],
-        issue: Dict[str, Any],
-    ) -> ParagraphsSchema:
-        """分段重试（带反馈）：在上一次校验失败后，将具体问题反馈给模型，
-        要求其仅修复缺失/重复/额外行号或时间重叠等问题，并重新生成满足约束的结构。
-
-        设计目标：减少盲目重试次数，显式引导模型修复关键违规项。
-        """
-        # 复用与基础提示相同的系统约束，额外在 human 中加入“上次问题与修复要求”
-        base_sys, base_human = None, None
-        # 直接重用 _prompt_for_paragraphs 中的系统提示内容，以保持一致性
-        _min_line = min(s.line_no for s in segs) if segs else 0
-        _max_line = max(s.line_no for s in segs) if segs else 0
-        _total_lines = len(segs)
-        _min_sec = min(s.start_sec for s in segs) if segs else 0.0
-        _max_sec = max(s.end_sec for s in segs) if segs else 0.0
-
-        sys = SystemMessage(content=dedent(
-            """
-            你是一名专业的结构化编辑，任务是修复上一次分段结果中的问题，并重新生成满足严格约束的分段结构。
-
-            仍需严格遵守以下硬性约束（与初次分段一致）：
-            1) 行号一致性：仅使用提供列表中真实行号；每个行号必须且仅出现一次；不得遗漏/重复/引入列表外行号。
-            2) 顶层时间覆盖：顶层段落按时间升序且不重叠，联合完整覆盖章节时间范围 [min_sec, max_sec]（容差 ≤ 0.05s）。
-            3) 边界=行集合：段落边界等于其 lines 的最小开始/最大结束；每行时间落在段落边界内（容差 ≤ 0.05s）。
-            4) 子层级：子段落在父段落范围内并满足相同规则；无子则 children=[]。
-            5) 输出契约：仅返回 JSON paragraphs；段落含 {title, start_sec, end_sec, lines, children, optimized}；
-               lines 为 {line_no, start_sec, end_sec, text}；optimized 为 List[str]。
-
-            内省自检：与初次分段一致；若仍不能满足，请回退输出一个顶层段落覆盖全范围。
-            """
-        ))
-
-        missing = issue.get("missing", []) or []
-        extra = issue.get("extra", []) or []
-        duplicate = issue.get("duplicate", []) or []
-        overlap = bool(issue.get("overlap", False))
-
-        content_lines = "\n".join(
-            f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
-        )
-        fix_directives = [
-            f"缺失行号需补回：{missing}" if missing else "",
-            f"剔除多余行号：{extra}" if extra else "",
-            f"去重重复行号：{duplicate}" if duplicate else "",
-            "消除时间重叠" if overlap else "",
-        ]
-        fix_directives = [x for x in fix_directives if x]
-        fix_text = "\n- ".join(fix_directives) if fix_directives else "无具体行号问题，仅严格对齐集合与时间约束"
-
-        human = HumanMessage(content=dedent(
-            f"""
-            章节标题：{chapter_title}
-            上一次结果未通过校验，问题如下（请严格修复）：
-            - {fix_text}
-
-            本章节合法行号范围：{_min_line} - {_max_line}
-            本章节字幕总行数：{_total_lines}
-            本章节时间范围：[{_min_sec:.3f} - {_max_sec:.3f}]
-
-            请严格使用下方列表中“已出现的行号”进行分段；不得遗漏/重复/引入外部行号；必须全量覆盖且无重叠；
-            段落边界应等于其行集合的最小开始/最大结束；若无法满足规则，请按回退策略输出单段结构。
-
-            {content_lines}
-            """
-        ))
-
         with self._text_sem:
             result = self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
         return result
@@ -731,6 +663,7 @@ class NoteGenerator:
 
         注意：不改变行集合归属，不合并/拆分段落，仅做边界与排序规范化。
         """
+
         def _norm_list(nodes: List[ParagraphSchema]) -> None:
             for p in nodes:
                 if p.lines:
@@ -751,16 +684,11 @@ class NoteGenerator:
         if not segs:
             raise ValueError(f"章节无内容：{cb}")
 
-        # 分段（业务重试，最多3次；重试不携带上次输出或错误信息）
+        # 分段（业务重试，最多3次）
         max_attempts = 3
         pgs: ParagraphsSchema | None = None
-        last_issue: Dict[str, Any] | None = None
         for attempt in range(1, max_attempts + 1):
-            # 首次常规提示；后续带反馈提示（聚焦修复缺失/重复/额外/重叠）
-            if attempt == 1 or not last_issue:
-                pgs = self._prompt_for_paragraphs(cb.title, segs)
-            else:
-                pgs = self._prompt_for_paragraphs_with_feedback(cb.title, segs, last_issue)
+            pgs = self._prompt_for_paragraphs(cb.title, segs)
 
             try:
                 # 归一化边界与顺序，再进行严格校验
@@ -773,47 +701,14 @@ class NoteGenerator:
                 break
             except Exception:
                 issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
-                last_issue = issue
                 self.logger.info(
                     "章节校验失败，准备重试",
                     extra={"chapter_index": ci, "attempt": attempt, **issue},
                 )
 
-                # 快速修正：若仅存在少量缺失行（无额外/无重复/无重叠），尝试在本次循环内直接修复，减少无谓重试
-                try_quick_fix = (
-                    bool(issue.get("missing"))
-                    and not bool(issue.get("extra"))
-                    and not bool(issue.get("duplicate"))
-                    and not bool(issue.get("overlap"))
-                    and len(issue.get("missing", [])) <= 5
-                )
-                if try_quick_fix:
-                    try:
-                        fix_report = self._auto_fix_paragraph_lines(segs, pgs.paragraphs, issue)
-                        # 修正后再次归一化并校验
-                        self._normalize_paragraphs(pgs.paragraphs)
-                        self._validate_time_coverage(segs, pgs.paragraphs)
-                        self.logger.info(
-                            "章节校验失败后快速修正通过",
-                            extra={
-                                "chapter_index": ci,
-                                "attempt": attempt,
-                                "auto_fix": fix_report,
-                            },
-                        )
-                        break
-                    except Exception as quick_err:
-                        self.logger.info(
-                            "快速修正未通过，将继续重试",
-                            extra={
-                                "chapter_index": ci,
-                                "attempt": attempt,
-                                "error": str(quick_err),
-                            },
-                        )
                 if attempt >= max_attempts:
                     self.logger.warning(
-                        "章节校验连续失败，触发自动修正",
+                        "章节校验连续失败，触发一次自动修正",
                         extra={"chapter_index": ci, "attempt": attempt, **issue},
                     )
                     try:
