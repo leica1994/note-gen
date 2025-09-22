@@ -466,9 +466,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if getattr(self, "chk_recursive", None):
                 self.chk_recursive.setEnabled(True)
                 self.chk_recursive.setVisible(True)
+                # 文件夹模式默认选中递归模式
+                try:
+                    self.chk_recursive.setChecked(True)
+                except Exception:
+                    pass
             if getattr(self, "chk_exclude_existing", None):
                 self.chk_exclude_existing.setEnabled(True)
                 self.chk_exclude_existing.setVisible(True)
+                # 文件夹模式默认选中“排除已生成”
+                try:
+                    self.chk_exclude_existing.setChecked(True)
+                except Exception:
+                    pass
 
     def _apply_default_icons(self):
         """为界面中的主要按钮设置默认图标（一次性）。
