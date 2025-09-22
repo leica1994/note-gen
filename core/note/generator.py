@@ -261,12 +261,7 @@ class NoteGenerator:
         return [s for s in items if start_line <= s.line_no <= end_line]
 
     def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphsSchema:
-        """基于给定字幕片段生成“段落”结构（仅顶层段落，不生成子段）。
-
-        设计动机：分章提示的遵循性好在于约束明确且结构简单。本提示收紧分段任务边界，
-        明确“禁止生成 children（必须为 []）”，并强化行号集合/时间覆盖/边界一致性等硬性约束，
-        结合回退策略，降低校验失败概率。
-        """
+        """基于给定字幕片段生成“段落”结构。"""
         # 计算本章节的行号与时间范围，帮助模型自检
         _min_line = min(s.line_no for s in segs) if segs else 0
         _max_line = max(s.line_no for s in segs) if segs else 0
@@ -276,7 +271,7 @@ class NoteGenerator:
 
         sys = SystemMessage(content=dedent(
             """
-            你是一名专业的结构化编辑，任务是将给定章节内的字幕行划分为“顶层段落”（禁止生成子段落），并为每个段落生成 optimized。
+            你是一名专业的结构化编辑，任务是将给定章节内的字幕行划分为“段落”，并为每个段落生成 optimized。
 
             硬性约束（必须全部满足）：
             1) 行号一致性与连续性：仅使用输入列表中真实出现的行号；每个行号必须且仅出现一次；
@@ -285,11 +280,16 @@ class NoteGenerator:
                - 相邻段落应时间相接：start_sec(i) ≈ end_sec(i-1)；不得出现空洞或交叉。
             3) 边界=行集合：任一段落 start_sec = 其 lines.start_sec 的最小值；end_sec = 其 lines.end_sec 的最大值；
                段落中每一行的 [start_sec,end_sec] 必须落在该段落边界之内（容差 ≤ 0.05s）。
-            4) 子层级：本任务禁止生成子段；children 必须始终为 []（不要返回 null 或 {}）。
-            5) 排序与结构：段落按时间升序；lines 按行号升序。
-            6) 输出契约：仅返回 JSON 对象，键为 paragraphs；每个段落包含 {title, start_sec, end_sec, lines, children, optimized}；
-               其中 lines 每项为 {line_no, start_sec, end_sec, text}；children 必为 []；optimized 为 List[str]。
-               为降低输出体量，lines.*.text 一律返回空字符串 ""（不要回传原文，程序将按行号本地回填）。
+            4) 排序与结构：段落按时间升序；lines 按行号升序。
+            5) 输出契约（与 LangChain 结构化输出对齐）：
+               - 返回格式：仅返回一个 JSON 对象（不要输出任何额外文字、注释、代码块或 Markdown），对象唯一键为 paragraphs，值为 List[段落]。
+               - 段落实体验证（字段与类型）：
+                 • 段落对象包含且仅包含以下字段：title, start_sec, end_sec, lines, children, optimized。
+                 • 行对象包含且仅包含以下字段：line_no, start_sec, end_sec, text。
+               - 体量控制与 text 规则：
+                 • 为降低体量，lines.*.text 必须一律为空字符串 ""；严禁回传原文（程序将按行号本地回填）。
+                 • 若底层结构化输出会省略“具有默认值”的字段，也允许省略 text，解析器将默认补 ""；但优先显式返回 text: "" 以提高一致性。
+               - 字段最小化与结构：严禁输出未定义字段；children 无子段落时必须为 []；optimized 为 List[str]；lines 按行号升序。
 
             内省自检（输出前在你内部完成，不要打印过程）：
             - 行号校验：收集所有段落 lines 的 line_no 集合，应与输入全集完全相等；计数 Σ(唯一行) = total_lines；重复=0；缺失=0；额外=0。
@@ -299,16 +299,16 @@ class NoteGenerator:
               b) 顶层覆盖：第一个段落 start_sec ≈ min_sec；最后一个段落 end_sec ≈ max_sec；
               c) 段落边界=其 lines 的最小开始/最大结束；所有行时间落入其段落边界。
 
-            回退策略：若任一检查未通过，则仅返回 1 个顶层段落：
+            回退策略：若任何检查未通过，则仅返回 1 个顶层段落：
             - title："整体内容概览"
             - start_sec=min_sec, end_sec=max_sec
-            - lines：包含全部行（按行号升序），每行时间/文本与输入完全一致
+            - lines：包含全部行（按行号升序），每行 start_sec/end_sec 与输入一致，text 一律为空字符串 ""
             - children=[]；optimized 可生成 1~N 条，保持不捏造事实
 
             optimized 说明：
             - 为每个段落生成 optimized（List[str]）：去除语气词、添加合理标点后，拼接成流畅句子；
             - 内容较长可自然分段；可使用 Markdown 标记重点（如 **加粗**、`行内代码`、列表等）；
-            - 严禁捏造未出现于该段落字幕中的事实；保留术语与数字的准确性与时序逻辑。
+            - 严禁捏造未出现在该段落字幕中的事实；保留术语与数字的准确性与时序逻辑。
             """
         ))
         content_lines = "\n".join(
@@ -325,7 +325,7 @@ class NoteGenerator:
             合法行号全集 S：{allowed_ids}
             注：S 为从 {_min_line} 到 {_max_line} 的连续整数集合。
             要求：仅可使用 S 中的行号；并且对所有段落 lines 的并集需“连续、无重复、无缺失、无额外”；
-            段落之间时间不重叠且完整覆盖范围；禁止生成子段（children 必须为 []）。
+            段落之间时间不重叠且完整覆盖范围；。
             段落边界应等于其 lines 的最小开始/最大结束；若无法满足全部硬性校验，请按回退策略输出单段结构。
 
             {content_lines}
@@ -650,10 +650,10 @@ class NoteGenerator:
         return int(chosen)
 
     def _convert_paragraph(
-        self,
-        ps: ParagraphSchema,
-        line_lookup: Dict[int, SubtitleSegment] | None = None,
-        backfill_text: bool = False,
+            self,
+            ps: ParagraphSchema,
+            line_lookup: Dict[int, SubtitleSegment] | None = None,
+            backfill_text: bool = False,
     ) -> Paragraph:
         """将分段 Schema 转换为运行期模型。
 
