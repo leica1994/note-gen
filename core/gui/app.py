@@ -105,11 +105,16 @@ class Worker(QtCore.QThread):
                     "api_key": mask_secret(self.cfg.text_llm.api_key),
                     "model": self.cfg.text_llm.model,
                     "temperature": self.cfg.text_llm.temperature,
+                    "max_tokens": self.cfg.text_llm.max_tokens,
+                    "concurrency": self.cfg.text_llm.concurrency,
                 },
                 "mm_llm": {
                     "base_url": self.cfg.mm_llm.base_url,
                     "api_key": mask_secret(self.cfg.mm_llm.api_key),
                     "model": self.cfg.mm_llm.model,
+                    "temperature": self.cfg.mm_llm.temperature,
+                    "max_tokens": self.cfg.mm_llm.max_tokens,
+                    "concurrency": self.cfg.mm_llm.concurrency,
                 },
                 "screenshot": self.cfg.screenshot.model_dump(mode="json"),
                 "export": self.cfg.export.model_dump(mode="json"),
@@ -290,6 +295,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_api_key = QtWidgets.QLineEdit(self.cfg.text_llm.api_key or "")
         self.edit_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.edit_model = QtWidgets.QLineEdit(self.cfg.text_llm.model)
+        # 文本 LLM 最大生成 token 数：0 表示未设置（沿用服务端/SDK 默认）
+        self.spin_text_max_tokens = QtWidgets.QSpinBox()
+        self.spin_text_max_tokens.setRange(0, 2147483647)
+        self.spin_text_max_tokens.setSpecialValueText("未设置（默认）")
+        try:
+            self.spin_text_max_tokens.setValue(int(self.cfg.text_llm.max_tokens or 0))
+        except Exception:
+            self.spin_text_max_tokens.setValue(0)
         self.spin_text_conc = QtWidgets.QSpinBox()
         # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
         self.spin_text_conc.setRange(1, 2147483647)
@@ -300,6 +313,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_mm_api_key = QtWidgets.QLineEdit(self.cfg.mm_llm.api_key or "")
         self.edit_mm_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.edit_mm_model = QtWidgets.QLineEdit(self.cfg.mm_llm.model)
+        # 多模态 LLM 最大生成 token 数：0 表示未设置（沿用服务端/SDK 默认）
+        self.spin_mm_max_tokens = QtWidgets.QSpinBox()
+        self.spin_mm_max_tokens.setRange(0, 2147483647)
+        self.spin_mm_max_tokens.setSpecialValueText("未设置（默认）")
+        try:
+            self.spin_mm_max_tokens.setValue(int(self.cfg.mm_llm.max_tokens or 0))
+        except Exception:
+            self.spin_mm_max_tokens.setValue(0)
         self.spin_mm_conc = QtWidgets.QSpinBox()
         # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
         self.spin_mm_conc.setRange(1, 2147483647)
@@ -309,12 +330,16 @@ class MainWindow(QtWidgets.QMainWindow):
         cfg_layout.addRow("文本LLM base_url", self.edit_base_url)
         cfg_layout.addRow("文本LLM api_key", self.edit_api_key)
         cfg_layout.addRow("文本LLM model", self.edit_model)
+        # 将 max_tokens 放在并发之前
+        cfg_layout.addRow("文本LLM max_tokens", self.spin_text_max_tokens)
         cfg_layout.addRow("文本LLM并发", self.spin_text_conc)
         cfg_layout.addRow(self.btn_test_llm)
         cfg_layout.addRow(QtWidgets.QLabel("——"))
         cfg_layout.addRow("多模态 base_url", self.edit_mm_base_url)
         cfg_layout.addRow("多模态 api_key", self.edit_mm_api_key)
         cfg_layout.addRow("多模态 model", self.edit_mm_model)
+        # 将 max_tokens 放在并发之前
+        cfg_layout.addRow("多模态 max_tokens", self.spin_mm_max_tokens)
         cfg_layout.addRow("多模态并发", self.spin_mm_conc)
         cfg_layout.addRow(self.btn_test_mm)
 
@@ -429,6 +454,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_mm_base_url.textChanged.connect(self._schedule_save_config)
         self.edit_mm_api_key.textChanged.connect(self._schedule_save_config)
         self.edit_mm_model.textChanged.connect(self._schedule_save_config)
+        # 新增：max_tokens 变更自动保存
+        self.spin_text_max_tokens.valueChanged.connect(self._schedule_save_config)
+        self.spin_mm_max_tokens.valueChanged.connect(self._schedule_save_config)
         self.spin_text_conc.valueChanged.connect(self._schedule_save_config)
         self.spin_mm_conc.valueChanged.connect(self._schedule_save_config)
         # 笔记模式变更
@@ -847,10 +875,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.text_llm.base_url = self.edit_base_url.text() or None
             self.cfg.text_llm.api_key = self.edit_api_key.text() or None
             self.cfg.text_llm.model = self.edit_model.text()
+            # 0 表示未设置，持久化为 None；否则写入整数值
+            v_text_mt = int(self.spin_text_max_tokens.value())
+            self.cfg.text_llm.max_tokens = None if v_text_mt == 0 else v_text_mt
             self.cfg.text_llm.concurrency = int(self.spin_text_conc.value())
             self.cfg.mm_llm.base_url = self.edit_mm_base_url.text() or None
             self.cfg.mm_llm.api_key = self.edit_mm_api_key.text() or None
             self.cfg.mm_llm.model = self.edit_mm_model.text()
+            v_mm_mt = int(self.spin_mm_max_tokens.value())
+            self.cfg.mm_llm.max_tokens = None if v_mm_mt == 0 else v_mm_mt
             self.cfg.mm_llm.concurrency = int(self.spin_mm_conc.value())
             # 笔记模式
             data = self.combo_note_mode.currentData()
