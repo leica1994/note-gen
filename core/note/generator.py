@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from pathlib import Path
 from textwrap import dedent
 from time import perf_counter
@@ -63,27 +64,55 @@ class NoteGenerator:
         return "\n".join(lines)
 
     def _prompt_for_chapters(self, meta: GenerationInputMeta) -> ChaptersSchema:
+        # 计算可用行号范围与总数，用于提示模型严格遵循行号集合
+        if meta.subtitle.items:
+            _min_line_no = min(s.line_no for s in meta.subtitle.items)
+            _max_line_no = max(s.line_no for s in meta.subtitle.items)
+            _total_lines = len(meta.subtitle.items)
+        else:
+            _min_line_no = 0
+            _max_line_no = 0
+            _total_lines = 0
+
         sys = SystemMessage(content=dedent(
             """
-            你是一名专业的结构化编辑，任务是将有序字幕拆分为多个'章节'。
-            
-            严格要求：
-            - 按字幕行号连续覆盖，禁止缺失或重叠；
-            - 每个章节返回：title, start_line_no, end_line_no；
-            - 章节按行号升序排列；
-            - 不做任何摘要或改写，不丢失行；
-            - 章节标题必须为简体中文表达，避免英文/拼音/纯时间/纯行号；如模型拟输出英文标题，请翻译为准确的中文短语。
-            
-            章节划分原则：
-            - 仅在出现明显“主题切换”时新开章节：如引言→主体、主题/场景/对象变化、明确的枚举段落（第一/第二/…）、问答/讲解模式切换、长停顿（>1.5s）、时间/地点/人物切换等。
-            - 章节应能以“名词短语/主题短句”命名，标题需准确概括该章的核心主题，避免纯时间/行号。
-            - 避免将同一主题拆成多个相邻章节；若相邻片段围绕同一主题，应合并为一章。
-            - 若某候选章节过短（例如仅涵盖极少字幕行或极短时长）且无明显边界信号，应与上下文合并，宁可更凝练也不要碎片化。
+            你是一名专业的结构化编辑，任务是将“给定字幕的行号列表”划分为多个“章节”。
+
+            严格要求（必须全部满足）：
+            1) 行号来源：只能使用“下面提供的字幕列表中真实出现过的行号”，禁止创造新行号、禁止估算/插值。
+            2) 区间定义：章节行号区间为闭区间 [start_line_no, end_line_no]（两端均包含）。
+            3) 相邻相接：相邻章节必须满足 start_line_no(i) = end_line_no(i-1) + 1。
+               - 正确示例：[1-10], [11-20]
+               - 错误示例：[1-10], [10-20]（共享 10 导致重叠）
+            4) 全量覆盖：所有字幕行号必须被章节区间完整覆盖，无缺失、无重复、无共享行号。
+            5) 无重叠且有序：任意两个章节不重叠，且按 start_line_no 升序排列。
+            6) 首尾边界：第一个章节的 start_line_no 必须等于最小行号；最后一个章节的 end_line_no 必须等于最大行号。
+            7) 标题：使用简体中文名词短语/主题短句，禁止英文/拼音/纯时间/纯行号。
+            8) 输出：仅返回一个 JSON 对象，键为 chapters，元素为 {title, start_line_no, end_line_no}；不要输出任何解释或多余字段。
+
+            计数校验（你在内部校验，不要输出过程）：
+            - 令 len_i = end_line_no(i) - start_line_no(i) + 1。
+            - 必须满足 Σ len_i = 字幕总行数（total_lines）。
+
+            内部生成建议（你在内部执行，不要输出过程）：
+            - 先拟定一个严格递增的 end_line_no 列表（不包含最大行号），再推导 start_line_no：
+              start_1 = 最小行号；start_i = end_{i-1} + 1；最后一个 end_line_no = 最大行号。
+
+            回退策略：
+            - 若任一校验未通过（覆盖、越界、重叠、排序、首尾、计数），仅返回 1 个章节，覆盖最小行号到最大行号，标题为“整体内容概览”。
+
+            边界指引：
+            - 若无法确定明确分界，合并为更少章节，优先保证规则正确性。
+            - 候选章节过短且无明显边界信号时，与相邻片段合并。
             """
         ))
         human = HumanMessage(content=dedent(
             f"""
-            以下是完整字幕（包含行号与时间戳）。请给出章节边界：
+            以下是完整字幕（包含行号与时间戳）。请基于这些“已出现的行号”给出章节边界。
+
+            合法行号范围：{_min_line_no} - {_max_line_no}
+            字幕总行数：{_total_lines}
+            注意：仅允许使用下面列表中真实出现过的行号；不得使用未出现的行号；必须全量覆盖且无重叠，排序正确。若不确定边界，按指引合并或回退为单章节。
 
             {self._render_all_subtitles(meta)}
             """
@@ -98,11 +127,110 @@ class NoteGenerator:
         for idx, ch in enumerate(result.chapters, start=1):
             if not ch.title or not _has_cjk(ch.title):
                 ch.title = f"第{idx}章"
-        self.logger.info("分章完成",
-                         extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter() - t0) * 1000)})
+        # 分章边界校验：检查行号覆盖完整、无重叠、无越界
+        try:
+            self._validate_chapters(meta, result)
+        except Exception as e:
+            # 记录失败上下文后抛出，阻断后续流程（质量优先）
+            self.logger.error(
+                "分章结果校验失败",
+                extra={
+                    "chapters": len(result.chapters),
+                    "cost_ms": int((perf_counter() - t0) * 1000),
+                    "error": str(e),
+                },
+            )
+            raise
+
+        self.logger.info(
+            "分章完成",
+            extra={"chapters": len(result.chapters), "cost_ms": int((perf_counter() - t0) * 1000)},
+        )
         # 证据
         # 调试证据归档能力已移除（简化发布版）
         return result
+
+    def _validate_chapters(self, meta: GenerationInputMeta, chs: ChaptersSchema) -> None:
+        """校验分章边界结果：
+        - 无重叠：任意两个章节的行号区间不重复；
+        - 无缺失：章节行号并集应等于全部字幕的行号集合；
+        - 无不存在行号：章节使用的行号必须都来自字幕集合；
+        - 基本有效性：start_line_no ≤ end_line_no；章节按起始行号非降序（建议）。
+
+        失败时抛出 ValueError，并给出精确原因。
+        """
+        # 收集字幕行号集合
+        expected_lines = [s.line_no for s in meta.subtitle.items]
+        if not expected_lines:
+            raise ValueError("字幕为空，无法分章")
+        expected_set = set(expected_lines)
+        min_line = min(expected_lines)
+        max_line = max(expected_lines)
+
+        if not chs.chapters:
+            raise ValueError("分章结果为空")
+
+        # 逐章检查并收集覆盖行
+        used_lines: list[int] = []
+        illegal_pairs: list[tuple[int, int, str]] = []
+        non_exist: set[int] = set()
+        for c in chs.chapters:
+            if c.start_line_no > c.end_line_no:
+                illegal_pairs.append((c.start_line_no, c.end_line_no, c.title))
+                continue
+            # 记录首尾是否存在于字幕集合（更明确反馈）
+            if c.start_line_no not in expected_set:
+                non_exist.add(c.start_line_no)
+            if c.end_line_no not in expected_set:
+                non_exist.add(c.end_line_no)
+            # 汇总该章节覆盖的行（闭区间）
+            # 注意：若字幕行号连续，range 可直接覆盖；若不连续，将在“不存在行号”中体现
+            used_lines.extend(range(c.start_line_no, c.end_line_no + 1))
+
+        if illegal_pairs:
+            detail = ", ".join(f"{t}:[{s}-{e}]" for s, e, t in illegal_pairs[:5])
+            raise ValueError(f"发现 {len(illegal_pairs)} 个非法区间（起始>结束）：{detail}")
+
+        used_set = set(used_lines)
+
+        # 不存在的行号（章节引用了超出字幕集合的行）
+        extra_lines = sorted(list(used_set - expected_set))
+        # 缺失（章节未覆盖到的字幕行）
+        missing_lines = sorted(list(expected_set - used_set))
+        # 重叠（同一行在多个章节中出现）
+        cnt = Counter(used_lines)
+        overlapped_lines = sorted([ln for ln, n in cnt.items() if n > 1])
+
+        # 排序与边界提示（非致命，但给出友好错误以便修复）
+        sorted_by_start = sorted(chs.chapters, key=lambda x: (x.start_line_no, x.end_line_no))
+        not_sorted = list(chs.chapters) != list(sorted_by_start)
+
+        # 汇总异常并抛出（优先严格错误）
+        errors: list[str] = []
+        if overlapped_lines:
+            sample = ", ".join(map(str, overlapped_lines[:10]))
+            errors.append(f"章节行号存在重叠，样例：{sample}")
+        if missing_lines:
+            sample = ", ".join(map(str, missing_lines[:10]))
+            errors.append(f"章节行号存在缺失，样例：{sample}")
+        # 结合两种方式提示“不存在行号”（区间边界不在集合 vs 覆盖集合超出）
+        non_exist_all = sorted(list(non_exist | set(extra_lines)))
+        if non_exist_all:
+            sample = ", ".join(map(str, non_exist_all[:10]))
+            errors.append(f"章节包含不存在的行号，样例：{sample}")
+        # 起止边界检查：建议覆盖完整字幕（非强制，若严格要求可改为错误）
+        if chs.chapters:
+            first_start = min(c.start_line_no for c in chs.chapters)
+            last_end = max(c.end_line_no for c in chs.chapters)
+            if first_start != min_line or last_end != max_line:
+                errors.append(
+                    f"章节未覆盖完整字幕范围（应覆盖 {min_line}-{max_line}，实际 {first_start}-{last_end}）"
+                )
+        if not_sorted:
+            errors.append("章节未按起始行号升序排列")
+
+        if errors:
+            raise ValueError("；".join(errors))
 
     def _select_lines(self, items: List[SubtitleSegment], start_line: int, end_line: int) -> List[SubtitleSegment]:
         return [s for s in items if start_line <= s.line_no <= end_line]
