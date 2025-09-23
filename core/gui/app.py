@@ -106,6 +106,7 @@ class Worker(QtCore.QThread):
                     "model": self.cfg.text_llm.model,
                     "temperature": self.cfg.text_llm.temperature,
                     "max_tokens": self.cfg.text_llm.max_tokens,
+                    "request_timeout": self.cfg.text_llm.request_timeout,
                     "concurrency": self.cfg.text_llm.concurrency,
                 },
                 "mm_llm": {
@@ -114,6 +115,7 @@ class Worker(QtCore.QThread):
                     "model": self.cfg.mm_llm.model,
                     "temperature": self.cfg.mm_llm.temperature,
                     "max_tokens": self.cfg.mm_llm.max_tokens,
+                    "request_timeout": self.cfg.mm_llm.request_timeout,
                     "concurrency": self.cfg.mm_llm.concurrency,
                 },
                 "screenshot": self.cfg.screenshot.model_dump(mode="json"),
@@ -304,6 +306,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_text_max_tokens.setValue(int(self.cfg.text_llm.max_tokens or 0))
         except Exception:
             self.spin_text_max_tokens.setValue(0)
+        # 新增：文本 LLM 请求超时（秒），位于“并发”上方
+        self.spin_text_timeout = QtWidgets.QSpinBox()
+        # 放宽范围：1 秒至 2^31-1 秒，覆盖长任务
+        self.spin_text_timeout.setRange(1, 2147483647)
+        try:
+            self.spin_text_timeout.setValue(int(self.cfg.text_llm.request_timeout or 300))
+        except Exception:
+            self.spin_text_timeout.setValue(300)
         self.spin_text_conc = QtWidgets.QSpinBox()
         # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
         self.spin_text_conc.setRange(1, 2147483647)
@@ -314,6 +324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         text_layout.addRow("文本LLM api_key", self.edit_api_key)
         text_layout.addRow("文本LLM model", self.edit_model)
         text_layout.addRow("文本LLM max_tokens", self.spin_text_max_tokens)
+        text_layout.addRow("文本LLM请求超时(秒)", self.spin_text_timeout)
         text_layout.addRow("文本LLM并发", self.spin_text_conc)
         text_layout.addRow(self.btn_test_llm)
         bottom_tabs.addTab(tab_text_llm, "文本LLM")
@@ -333,6 +344,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_mm_max_tokens.setValue(int(self.cfg.mm_llm.max_tokens or 0))
         except Exception:
             self.spin_mm_max_tokens.setValue(0)
+        # 新增：多模态 LLM 请求超时（秒），位于“并发”上方
+        self.spin_mm_timeout = QtWidgets.QSpinBox()
+        self.spin_mm_timeout.setRange(1, 2147483647)
+        try:
+            self.spin_mm_timeout.setValue(int(self.cfg.mm_llm.request_timeout or 300))
+        except Exception:
+            self.spin_mm_timeout.setValue(300)
         self.spin_mm_conc = QtWidgets.QSpinBox()
         # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
         self.spin_mm_conc.setRange(1, 2147483647)
@@ -343,6 +361,7 @@ class MainWindow(QtWidgets.QMainWindow):
         mm_layout.addRow("多模态 api_key", self.edit_mm_api_key)
         mm_layout.addRow("多模态 model", self.edit_mm_model)
         mm_layout.addRow("多模态 max_tokens", self.spin_mm_max_tokens)
+        mm_layout.addRow("多模态请求超时(秒)", self.spin_mm_timeout)
         mm_layout.addRow("多模态并发", self.spin_mm_conc)
         mm_layout.addRow(self.btn_test_mm)
 
@@ -460,6 +479,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # 新增：max_tokens 变更自动保存
         self.spin_text_max_tokens.valueChanged.connect(self._schedule_save_config)
         self.spin_mm_max_tokens.valueChanged.connect(self._schedule_save_config)
+        # 新增：请求超时变更自动保存
+        self.spin_text_timeout.valueChanged.connect(self._schedule_save_config)
+        self.spin_mm_timeout.valueChanged.connect(self._schedule_save_config)
         self.spin_text_conc.valueChanged.connect(self._schedule_save_config)
         self.spin_mm_conc.valueChanged.connect(self._schedule_save_config)
         # 笔记模式变更
@@ -881,12 +903,21 @@ class MainWindow(QtWidgets.QMainWindow):
             # 0 表示未设置，持久化为 None；否则写入整数值
             v_text_mt = int(self.spin_text_max_tokens.value())
             self.cfg.text_llm.max_tokens = None if v_text_mt == 0 else v_text_mt
+            # 请求超时（秒）
+            try:
+                self.cfg.text_llm.request_timeout = int(self.spin_text_timeout.value())
+            except Exception:
+                pass
             self.cfg.text_llm.concurrency = int(self.spin_text_conc.value())
             self.cfg.mm_llm.base_url = self.edit_mm_base_url.text() or None
             self.cfg.mm_llm.api_key = self.edit_mm_api_key.text() or None
             self.cfg.mm_llm.model = self.edit_mm_model.text()
             v_mm_mt = int(self.spin_mm_max_tokens.value())
             self.cfg.mm_llm.max_tokens = None if v_mm_mt == 0 else v_mm_mt
+            try:
+                self.cfg.mm_llm.request_timeout = int(self.spin_mm_timeout.value())
+            except Exception:
+                pass
             self.cfg.mm_llm.concurrency = int(self.spin_mm_conc.value())
             # 笔记模式
             data = self.combo_note_mode.currentData()
