@@ -28,14 +28,8 @@ class MultiModalLLM:
             max_tokens=cfg.max_tokens,
             timeout=cfg.request_timeout,
         )
-        # 提升 LLM 查询的失败重试次数：
-        # - 429（限流）：由原来的 3 次提升到 5 次（遵循合规退避 20s）
-        # - 5xx/timeout：仍保持最多 1 次重试（退避 2s）
-        # 说明：仅提升 LLM 相关重试次数，不影响其他模块（如 FFmpeg）。
-        self._retry = RetryPolicy(
-            max_retries=5,
-            category_max={"429": 5, "5xx": 1, "timeout": 1},
-        )
+        # 统一重试策略：任意异常最多重试 5 次，退避 2s
+        self._retry = RetryPolicy(max_retries=5)
 
     def _image_block(self, image_path: str) -> dict:
         if self.cfg.use_base64_image:
@@ -64,7 +58,7 @@ class MultiModalLLM:
         msg = HumanMessage(content=blocks)
         model_with_schema = self._model.with_structured_output(schema)
 
-        @self._retry(classify_http_exception)
+        @self._retry
         def _invoke() -> T:
             log.info("调用多模态 LLM（结构化输出）", extra={"schema": schema.__name__, "image": image_path})
             return model_with_schema.invoke([msg])  # type: ignore[return-value]
@@ -106,7 +100,7 @@ class MultiModalLLM:
         ]
         msg = HumanMessage(content=blocks)
 
-        @self._retry(classify_http_exception)
+        @self._retry
         def _invoke_text() -> str:
             log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path})
             resp = self._model.invoke([msg])

@@ -48,6 +48,7 @@ core/utils/            # 日志、哈希、重试、脱敏
 ## 配置说明（cache.json）
 - 文本 LLM（`text_llm`）与多模态 LLM（`mm_llm`）：
   - `base_url`、`api_key`、`model`、`max_tokens`、`concurrency`、`request_timeout`。
+  - 重试策略：对任意异常统一最多重试 5 次（不含首次），每次退避 2s；该行为由 `core/utils/retry.py` 的 `RetryPolicy` 实现。
 - 截图（`screenshot`）：
   - `ffmpeg_path`、`low_width/low_height`、`grid_columns/rows`、`hi_quality`；
   - `edge_margin_sec`：默认 `0.5` 秒，时间点避开段落首尾；

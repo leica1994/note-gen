@@ -25,14 +25,8 @@ class TextLLM:
             max_tokens=cfg.max_tokens,
             timeout=cfg.request_timeout,
         )
-        # 提升 LLM 查询的失败重试次数：
-        # - 429（限流）：由原来的 3 次提升到 5 次（遵循合规退避 20s）
-        # - 5xx/timeout：仍保持最多 1 次重试（退避 2s）
-        # 说明：仅提升 LLM 相关重试次数，不影响其他模块（如 FFmpeg）。
-        self._retry = RetryPolicy(
-            max_retries=5,
-            category_max={"429": 5, "5xx": 1, "timeout": 1},
-        )
+        # 统一重试策略：任意异常最多重试 5 次，退避 2s
+        self._retry = RetryPolicy(max_retries=5)
 
     def structured_invoke(self, schema: Type[T], prompt_messages: list, json_mode: bool = False) -> T:
         """以结构化输出方式执行调用。
@@ -50,7 +44,7 @@ class TextLLM:
         else:
             model_with_schema = self._model.with_structured_output(schema)
 
-        @self._retry(classify_http_exception)
+        @self._retry
         def _invoke() -> T:
             log.info("调用文本 LLM（结构化输出）", extra={"json_mode": json_mode, "schema": schema.__name__})
             return model_with_schema.invoke(prompt_messages)  # type: ignore[return-value]
