@@ -64,7 +64,9 @@ class Screenshotter:
                 raise RuntimeError(f"ffmpeg 截图失败：{res.stderr}")
             return None
 
-        wrapped = self._retry(self._classify_ffmpeg)(_invoke)
+        # 修正：RetryPolicy 作为装饰器使用，不接受分类器参数；
+        # 之前传入 _classify_ffmpeg 会导致返回字符串，被当作可调用引发 TypeError。
+        wrapped = self._retry(_invoke)
         return wrapped()
 
     def _run_ffmpeg_dual_seek(self, video: Path, out_path: Path, ts_sec: float,
@@ -98,7 +100,7 @@ class Screenshotter:
                 raise RuntimeError(f"ffmpeg 截图失败：{res.stderr}")
             return None
 
-        wrapped = self._retry(self._classify_ffmpeg)(_invoke)
+        wrapped = self._retry(_invoke)
         return wrapped()
 
     def _classify_ffmpeg(self, e: Exception) -> str | None:
@@ -192,7 +194,7 @@ class Screenshotter:
                 raise RuntimeError(f"ffmpeg 九宫格一把流失败：{res.stderr}")
             return None
 
-        wrapped = self._retry(self._classify_ffmpeg)(_invoke)
+        wrapped = self._retry(_invoke)
         wrapped()
         # 若未产生输出文件（常见于 select 未命中任何帧），显式视为失败，交由调用方走回退路径
         try:
