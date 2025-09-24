@@ -64,6 +64,13 @@ class NoteGenerator:
         return "\n".join(lines)
 
     def _prompt_for_chapters(self, meta: GenerationInputMeta) -> ChaptersSchema:
+        """基于完整字幕生成“章节边界”。
+
+        改进点：
+        - 新增“章节数量与时长规则”与“内容边界信号”，抑制模型在长素材下回退为单章。
+        - 在提示中提供总时长与期望章节数范围，提升模型对目标粒度的把握。
+        - 移除“仅返回 1 章”的回退条款，避免保守合并。
+        """
         # 计算可用行号范围与总数，用于提示模型严格遵循行号集合
         if meta.subtitle.items:
             _min_line_no = min(s.line_no for s in meta.subtitle.items)
@@ -73,6 +80,25 @@ class NoteGenerator:
             _min_line_no = 0
             _max_line_no = 0
             _total_lines = 0
+
+        # 计算全局时间范围与总时长（秒），用于给出“章节数与时长”的软硬约束
+        if meta.subtitle.items:
+            _min_sec = min(s.start_sec for s in meta.subtitle.items)
+            _max_sec = max(s.end_sec for s in meta.subtitle.items)
+            _total_sec = max(0.0, _max_sec - _min_sec)
+        else:
+            _min_sec = 0.0
+            _max_sec = 0.0
+            _total_sec = 0.0
+
+        # 动态建议：基于总时长估算期望章节范围（软约束），目标粒度：每章 3~8 分钟。
+        # 为避免引入 math 依赖，使用整数近似（对总秒数取整）：
+        _int_total = int(_total_sec + 0.5)
+        adv_min = max(3, min(20, -(-_int_total // 480)))  # ceil(T/480)
+        adv_max_calc = max(3, min(20, _int_total // 180))  # floor(T/180)
+        adv_max = max(adv_min, adv_max_calc)
+        # 硬性下限（长素材）：≥15 分钟或 ≥120 行时，至少 4 章
+        min_required = 4 if (_total_sec >= 900 or _total_lines >= 120) else 1
 
         sys = SystemMessage(content=dedent(
             """
@@ -106,12 +132,16 @@ class NoteGenerator:
             - 先拟定一个严格递增的 end_line_no 列表（不包含最大行号），再推导 start_line_no：
               start_1 = 最小行号；start_i = end_{i-1} + 1；最后一个 end_line_no = 最大行号。
 
-            回退策略：
-            - 若任一校验未通过（覆盖、越界、重叠、排序、首尾、计数），仅返回 1 个章节，覆盖最小行号到最大行号，标题为“整体内容概览”。
+            章节数量与时长规则（关键）：
+            - 建议每章覆盖 3~8 分钟，优先按“主题边界”切分，而非机械均分。
+            - 对于中长时长素材，应避免过少章节：若总时长 ≥ 15 分钟或总行数 ≥ 120，章节数不得少于最少下限（见用户侧给定范围）。
+            - 禁止仅返回 1 个章节，除非素材极短（如总时长 < 6 分钟且总行数 < 40）。
+            - 单章过长（>10 分钟）时应进一步细分，若无明显边界信号可依据主题/任务转换、术语变化、结构转折进行切分。
 
-            边界指引：
-            - 若无法确定明确分界，合并为更少章节，优先保证规则正确性。
-            - 候选章节过短且无明显边界信号时，与相邻片段合并。
+            内容边界信号（参考）：
+            - 主题/任务/阶段切换；出现新的术语模块/子系统；从介绍 → 操作 → 结果/总结的阶段变化；
+            - 提纲/转折提示词（首先/其次/然后/接着/因此/总结/回顾）；
+            - 新示例/新问题/新小节开头；Q&A 段落；长时间停顿或场景显著变化（从字幕与时间上可感知）。
             """
         ))
         human = HumanMessage(content=dedent(
@@ -121,7 +151,9 @@ class NoteGenerator:
 
             合法行号范围：{_min_line_no} - {_max_line_no}
             字幕总行数：{_total_lines}
-            注意：仅允许使用下面列表中真实出现过的行号；不得使用未出现的行号；必须全量覆盖且无重叠，排序正确。若不确定边界，按指引合并或回退为单章节。
+            视频总时长：约 {_total_sec:.1f} 秒（≈ {_total_sec/60.0:.1f} 分）
+            期望章节数范围：{adv_min} - {adv_max}（基于总时长估算）；硬性下限（若适用）：{min_required}
+            注意：仅允许使用下面列表中真实出现过的行号；不得使用未出现的行号；必须全量覆盖且无重叠，排序正确。若不确定边界，请依据“内容边界信号”适度合并或拆分，并满足“章节数量与时长规则”（禁止单章回退，除非素材极短）。
 
             {self._render_all_subtitles(meta)}
             """
@@ -148,12 +180,11 @@ class NoteGenerator:
                 self.logger.info(
                     "分章完成",
                     extra={
-                        "chapters": len(result.chapters),
+                        "chapters": [chapter.title for chapter in result.chapters],
                         "attempt": attempt,
                         "cost_ms": int((perf_counter() - t_attempt) * 1000),
                     },
                 )
-                # 发布版不再归档证据
                 return result
             except Exception as e:
                 last_err = e
