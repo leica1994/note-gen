@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from core.config.schema import LLMConfig
 from core.utils.retry import RetryPolicy, classify_http_exception
 
+from langchain_core.messages import BaseMessage
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -48,5 +49,25 @@ class TextLLM:
         def _invoke() -> T:
             log.info("调用文本 LLM（结构化输出）", extra={"json_mode": json_mode, "schema": schema.__name__})
             return model_with_schema.invoke(prompt_messages)  # type: ignore[return-value]
+
+        return _invoke()
+
+    def invoke(self, prompt_messages: list) -> str:
+        """以普通文本形式执行调用，返回模型原始内容。"""
+        log = logging.getLogger("note_gen.llms.text")
+
+        @self._retry
+        def _invoke() -> str:
+            log.info("调用文本 LLM（普通输出）")
+            message = self._model.invoke(prompt_messages)
+            if isinstance(message, BaseMessage):
+                content = message.content
+            elif isinstance(message, str):
+                content = message
+            else:
+                content = getattr(message, "content", None)
+            if not isinstance(content, str) or not content:
+                raise ValueError("模型返回内容为空或类型异常")
+            return content
 
         return _invoke()

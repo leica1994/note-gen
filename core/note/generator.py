@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +43,13 @@ class NoteGenerator:
     4) 重拍：按被选中的时间戳重拍高清单帧
     5) 汇总：生成 Note 对象，用于后续导出 Markdown
     """
+
+    _FALLBACK_MAX_LINES = 120
+    _LENGTH_LIMIT_KEYWORDS = (
+        "could not parse response content as the length limit was reached",
+        "maximum context length",
+        "length limit was reached",
+    )
 
     def __init__(self, config: AppConfig, logger: logging.Logger | None = None) -> None:
         self.cfg = config
@@ -362,9 +371,236 @@ class NoteGenerator:
             {content_lines}
             """
         ))
+        try:
+            with self._text_sem:
+                return self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
+        except Exception as err:
+            if not self._is_length_limit_error(err):
+                raise
+            self.logger.warning(
+                "结构化输出命中长度限制，启用兜底分段",
+                extra={
+                    "chapter_title": chapter_title,
+                    "total_lines": _total_lines,
+                    "min_line": _min_line,
+                    "max_line": _max_line,
+                    "error": str(err),
+                },
+            )
+
+        return self._prompt_for_paragraphs_fallback(
+            chapter_title=chapter_title,
+            segs=segs,
+            chapter_min_line=_min_line,
+            chapter_max_line=_max_line,
+            chapter_min_sec=_min_sec,
+            chapter_max_sec=_max_sec,
+        )
+
+    def _prompt_for_paragraphs_fallback(
+        self,
+        chapter_title: str,
+        segs: List[SubtitleSegment],
+        chapter_min_line: int,
+        chapter_max_line: int,
+        chapter_min_sec: float,
+        chapter_max_sec: float,
+    ) -> ParagraphsSchema:
+        """结构化输出触发长度限制后的分段兜底策略。"""
+        if not segs:
+            raise ValueError("兜底模式输入字幕为空")
+
+        chunks = self._split_segments_for_fallback(segs, self._FALLBACK_MAX_LINES)
+        total_chunks = len(chunks) or 1
+        self.logger.info(
+            "使用兜底分段策略",
+            extra={
+                "chapter_title": chapter_title,
+                "total_lines": len(segs),
+                "chunk_count": len(chunks),
+                "max_lines_per_chunk": self._FALLBACK_MAX_LINES,
+            },
+        )
+
+        combined: List[Dict[str, Any]] = []
+        prev_end_line: int | None = None
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_result = self._invoke_paragraph_chunk_fallback(
+                chapter_title=chapter_title,
+                chunk_segs=chunk,
+                chunk_index=idx,
+                total_chunks=total_chunks,
+                chapter_min_line=chapter_min_line,
+                chapter_max_line=chapter_max_line,
+                chapter_min_sec=chapter_min_sec,
+                chapter_max_sec=chapter_max_sec,
+                previous_end_line=prev_end_line,
+            )
+            combined.extend(chunk_result)
+            if chunk:
+                prev_end_line = chunk[-1].line_no
+
+        if not combined:
+            raise ValueError("兜底模式未返回任何段落")
+
+        combined.sort(key=lambda item: item.get("start_sec", 0.0))
+        try:
+            schema = ParagraphsSchema.model_validate({"paragraphs": combined})
+        except Exception as err:
+            self.logger.error(
+                "兜底分段结果校验失败",
+                extra={
+                    "chapter_title": chapter_title,
+                    "error": str(err),
+                    "chunk_count": len(chunks),
+                },
+            )
+            raise
+
+        return schema
+
+    def _invoke_paragraph_chunk_fallback(
+        self,
+        chapter_title: str,
+        chunk_segs: List[SubtitleSegment],
+        chunk_index: int,
+        total_chunks: int,
+        chapter_min_line: int,
+        chapter_max_line: int,
+        chapter_min_sec: float,
+        chapter_max_sec: float,
+        previous_end_line: int | None,
+    ) -> List[Dict[str, Any]]:
+        """在兜底模式下调用 LLM 生成单个分段的段落结果。"""
+        if not chunk_segs:
+            return []
+
+        chunk_min_line = chunk_segs[0].line_no
+        chunk_max_line = chunk_segs[-1].line_no
+        chunk_min_sec = min(s.start_sec for s in chunk_segs)
+        chunk_max_sec = max(s.end_sec for s in chunk_segs)
+        allowed_ids = "[" + ", ".join(str(s.line_no) for s in chunk_segs) + "]"
+        lines_text = "\n".join(
+            f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in chunk_segs
+        )
+        prev_line_desc = previous_end_line if previous_end_line is not None else "无"
+
+        sys = SystemMessage(content=dedent(
+            """
+            你正在执行字幕分段的兜底模式。
+            仅返回一个 JSON 对象，结构为 {"paragraphs": [...] }，禁止输出任何额外文本或代码块。
+            规则：
+            1. 段落按时间升序；lines 按行号升序。
+            2. 仅使用输入行号，每个行号只出现一次。
+            3. 段落 start_sec/end_sec 分别等于所含行的最小开始和最大结束；行的时间必须位于段落边界内。
+            4. 行对象必须包含 line_no、start_sec、end_sec、text，其中 text 必须返回空字符串 ""。
+            5. children 无子项时使用 []，optimized 为 List[str]。
+            """
+        ))
+        human = HumanMessage(content=dedent(
+            f"""
+            章节标题：{chapter_title}
+            兜底分段：第 {chunk_index}/{total_chunks} 段
+            章节整体行号范围：{chapter_min_line} - {chapter_max_line}
+            章节整体时间范围：[{chapter_min_sec:.3f} - {chapter_max_sec:.3f}]
+            已处理的最后行号：{prev_line_desc}
+            当前输入行号范围：{chunk_min_line} - {chunk_max_line}
+            当前输入时间范围：[{chunk_min_sec:.3f} - {chunk_max_sec:.3f}]
+            当前段允许的行号集合：{allowed_ids}
+            请严格输出 JSON 对象，保证行号连续且无缺失。
+
+            {lines_text}
+            """
+        ))
+
         with self._text_sem:
-            result = self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
+            raw = self.text_llm.invoke([sys, human])
+
+        try:
+            json_payload = self._extract_json_object(raw)
+            parsed = json.loads(json_payload)
+        except Exception as err:
+            self.logger.error(
+                "兜底分段 JSON 解析失败",
+                extra={
+                    "chapter_title": chapter_title,
+                    "chunk_index": chunk_index,
+                    "error": str(err),
+                },
+            )
+            raise ValueError("兜底模式 JSON 解析失败") from err
+
+        if not isinstance(parsed, dict):
+            raise ValueError("兜底模式返回结构必须是 JSON 对象")
+        paragraphs = parsed.get("paragraphs")
+        if not isinstance(paragraphs, list):
+            raise ValueError("兜底模式返回缺少 paragraphs 数组")
+
+        result: List[Dict[str, Any]] = []
+        for item in paragraphs:
+            if not isinstance(item, dict):
+                raise ValueError("兜底模式段落项必须是对象")
+            result.append(item)
+
+        self.logger.info(
+            "兜底分段完成",
+            extra={
+                "chapter_title": chapter_title,
+                "chunk_index": chunk_index,
+                "paragraphs": len(result),
+            },
+        )
         return result
+
+    def _split_segments_for_fallback(self, segs: List[SubtitleSegment], max_lines: int) -> List[List[SubtitleSegment]]:
+        """按照最大行数切分字幕列表，用于兜底模式控制上下文体积。"""
+        if not segs:
+            return []
+        if max_lines <= 0 or len(segs) <= max_lines:
+            return [segs]
+
+        chunks: List[List[SubtitleSegment]] = []
+        current: List[SubtitleSegment] = []
+        for seg in segs:
+            current.append(seg)
+            if len(current) >= max_lines:
+                chunks.append(current)
+                current = []
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _extract_json_object(self, text: str) -> str:
+        """从模型输出中截取 JSON 对象内容。"""
+        if text is None:
+            raise ValueError("LLM 返回为空")
+        cleaned = text.strip()
+        if not cleaned:
+            raise ValueError("LLM 返回为空白")
+
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+        if fenced:
+            return fenced.group(1).strip()
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and start < end:
+            return cleaned[start:end + 1].strip()
+        return cleaned
+
+    def _is_length_limit_error(self, err: Exception) -> bool:
+        """检测异常是否与上下文长度限制相关。"""
+        visited: Set[int] = set()
+        current: Exception | None = err
+        while current and id(current) not in visited:
+            visited.add(id(current))
+            message = str(current)
+            if message:
+                lower = message.lower()
+                if any(keyword in lower for keyword in self._LENGTH_LIMIT_KEYWORDS):
+                    return True
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        return False
 
     def _validate_time_coverage(self, segs: List[SubtitleSegment], paras: List[ParagraphSchema]) -> None:
         """校验：
