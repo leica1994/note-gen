@@ -87,6 +87,11 @@ class NoteConfig(BaseModel):
     # - screenshot_dir：若设置，则高清截图输出写入该目录；否则回退至 export.outputs_root/<task_id>。
     note_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
     screenshot_dir: Optional[Path] = Field(default=None, description="截图目录（高清截图输出优先覆盖）")
+    chapter_resegment_char_threshold: int = Field(
+        default=6000,
+        ge=0,
+        description="单章字符阈值；超过该阈值时自动细分子章节，0 表示禁用",
+    )
 
     @model_validator(mode="before")
     @classmethod

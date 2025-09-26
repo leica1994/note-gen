@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Tuple
 
-from core.note.models import Note, Paragraph
+from core.note.models import Chapter, Note, Paragraph
 
 
 class MarkdownExporter:
@@ -22,14 +22,33 @@ class MarkdownExporter:
         lines: list[str] = []
 
         for ci, ch in enumerate(note.chapters, start=1):
-            # 章标题为一级标题
-            lines.append(f"# 第{ci}章 {ch.title}")
-            lines.extend(self._render_paragraphs(ci, ch.paragraphs))
+            lines.extend(self._render_chapter(ch, (ci,), heading_level=1))
 
         out_file.write_text("\n".join(lines), encoding="utf-8")
         return out_file
 
-    def _render_paragraphs(self, ci: int, paragraphs: Iterable[Paragraph]) -> list[str]:
+    def _render_chapter(self, chapter: Chapter, index_path: Tuple[int, ...], heading_level: int) -> list[str]:
+        """递归渲染章节与子章节。"""
+        level = max(1, min(6, heading_level))
+        idx_label = ".".join(str(i) for i in index_path)
+        lines: list[str] = []
+
+        if heading_level == 1:
+            lines.append(f"# 第{index_path[0]}章 {chapter.title}")
+        else:
+            hashes = "#" * level
+            lines.append(f"{hashes} 第{idx_label}节 {chapter.title}")
+
+        if chapter.paragraphs:
+            lines.extend(self._render_paragraphs(heading_level + 1, idx_label, chapter.paragraphs))
+
+        if getattr(chapter, "children", None):
+            for child_idx, child in enumerate(chapter.children, start=1):
+                lines.extend(self._render_chapter(child, index_path + (child_idx,), heading_level + 1))
+
+        return lines
+
+    def _render_paragraphs(self, heading_level: int, index_prefix: str, paragraphs: Iterable[Paragraph]) -> list[str]:
         """渲染一章内的所有段落（含递归子段）。
 
         规则：
@@ -40,8 +59,11 @@ class MarkdownExporter:
         """
         out: list[str] = []
         for pi, p in enumerate(paragraphs, start=1):
-            idx_prefix = f"{ci}.{pi}"
-            out.extend(self._render_single_paragraph(heading_level=2, idx_prefix=idx_prefix, p=p))
+            if index_prefix:
+                idx_prefix = f"{index_prefix}.{pi}"
+            else:
+                idx_prefix = str(pi)
+            out.extend(self._render_single_paragraph(heading_level=heading_level, idx_prefix=idx_prefix, p=p))
         return out
 
     def _render_single_paragraph(self, heading_level: int, idx_prefix: str, p: Paragraph) -> list[str]:

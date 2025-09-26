@@ -32,6 +32,7 @@ class Chapter(BaseModel):
     start_sec: float
     end_sec: float
     paragraphs: List[Paragraph]
+    children: List["Chapter"] = Field(default_factory=list)
 
 
 class Note(BaseModel):

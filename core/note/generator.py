@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 import threading
@@ -9,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from textwrap import dedent
 from time import perf_counter
-from typing import List, Dict, Any, Set, Iterable
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -24,13 +23,12 @@ from core.note.models import (
     Note,
     Paragraph,
     ParagraphImage,
-    ParagraphLine,
     ParagraphSchema,
     ParagraphsSchema,
 )
 from core.screenshot.ffmpeg import Screenshotter
 from core.screenshot.grid import generate_grid_timestamps
-from core.subtitles.models import SubtitleSegment
+from core.subtitles.models import SubtitleDocument, SubtitleSegment
 
 
 class NoteGenerator:
@@ -43,7 +41,6 @@ class NoteGenerator:
     4) 重拍：按被选中的时间戳重拍高清单帧
     5) 汇总：生成 Note 对象，用于后续导出 Markdown
     """
-
 
     def __init__(self, config: AppConfig, logger: logging.Logger | None = None) -> None:
         self.cfg = config
@@ -59,6 +56,10 @@ class NoteGenerator:
         # - 高清重拍：保持全局串行，避免 I/O 抖动并保证稳定性
         self._thumb_sem = threading.Semaphore(max(1, self.cfg.screenshot.max_workers))
         self._shot_sem = threading.Semaphore(1)
+        self._chapter_char_threshold = max(
+            0,
+            getattr(getattr(self.cfg, "note", None), "chapter_resegment_char_threshold", 0),
+        )
 
     def _render_all_subtitles(self, meta: GenerationInputMeta) -> str:
         lines = []
@@ -154,7 +155,7 @@ class NoteGenerator:
 
             合法行号范围：{_min_line_no} - {_max_line_no}
             字幕总行数：{_total_lines}
-            视频总时长：约 {_total_sec:.1f} 秒（≈ {_total_sec/60.0:.1f} 分）
+            视频总时长：约 {_total_sec:.1f} 秒（≈ {_total_sec / 60.0:.1f} 分）
             期望章节数范围：{adv_min} - {adv_max}（基于总时长估算）；硬性下限（若适用）：{min_required}
             注意：仅允许使用下面列表中真实出现过的行号；不得使用未出现的行号；必须全量覆盖且无重叠，排序正确。若不确定边界，请依据“内容边界信号”适度合并或拆分，并满足“章节数量与时长规则”（禁止单章回退，除非素材极短）。
 
@@ -293,6 +294,32 @@ class NoteGenerator:
 
     def _select_lines(self, items: List[SubtitleSegment], start_line: int, end_line: int) -> List[SubtitleSegment]:
         return [s for s in items if start_line <= s.line_no <= end_line]
+
+    def _segment_char_count(self, segs: List[SubtitleSegment]) -> int:
+        """统计字幕片段字符总数。"""
+        return sum(len(s.text or "") for s in segs)
+
+    def _should_resplit_chapter(self, segs: List[SubtitleSegment]) -> bool:
+        """判断当前章节是否需要进一步细分。"""
+        if self._chapter_char_threshold <= 0:
+            return False
+        return self._segment_char_count(segs) > self._chapter_char_threshold
+
+    def _build_sub_meta(
+            self,
+            meta: GenerationInputMeta,
+            segs: List[SubtitleSegment],
+    ) -> GenerationInputMeta:
+        """基于原始元数据构造子章节的元数据副本。"""
+        return GenerationInputMeta(
+            video_path=meta.video_path,
+            subtitle=SubtitleDocument(
+                items=[s.model_copy(deep=True) for s in segs],
+                source_path=meta.subtitle.source_path,
+                format=meta.subtitle.format,
+            ),
+            params=dict(meta.params),
+        )
 
     def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphsSchema:
         """基于给定字幕片段生成“段落”结构。"""
@@ -555,46 +582,72 @@ class NoteGenerator:
 
         _norm_list(paras)
 
-    def _process_chapter(self, ci: int, cb: ChapterBoundary, meta: GenerationInputMeta, task_out_dir: Path) -> Chapter:
-        self.logger.info("处理章节", extra={"chapter_index": ci, "title": cb.title})
-        segs = self._select_lines(meta.subtitle.items, cb.start_line_no, cb.end_line_no)
-        if not segs:
-            raise ValueError(f"章节无内容：{cb}")
+    def _process_leaf_chapter(
+            self,
+            index_path: Tuple[int, ...],
+            title: str,
+            segs: List[SubtitleSegment],
+            meta: GenerationInputMeta,
+            task_out_dir: Path,
+    ) -> Chapter:
+        chapter_index = index_path[0]
+        chapter_path = ".".join(str(i) for i in index_path)
+        chapter_dir = task_out_dir / ("chapter_" + "_".join(str(i) for i in index_path))
+        try:
+            chapter_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
-        # 分段（业务重试，最多3次）
         max_attempts = 3
         pgs: ParagraphsSchema | None = None
         for attempt in range(1, max_attempts + 1):
-            pgs = self._prompt_for_paragraphs(cb.title, segs)
+            pgs = self._prompt_for_paragraphs(title, segs)
 
             try:
-                # 归一化边界与顺序，再进行严格校验
                 self._normalize_paragraphs(pgs.paragraphs)
                 self._validate_time_coverage(segs, pgs.paragraphs)
                 self.logger.info(
                     "章节校验通过",
-                    extra={"chapter_index": ci, "paragraphs": len(pgs.paragraphs), "attempt": attempt},
+                    extra={
+                        "chapter_index": chapter_index,
+                        "chapter_path": chapter_path,
+                        "paragraphs": len(pgs.paragraphs),
+                        "attempt": attempt,
+                    },
                 )
                 break
             except Exception as err:
                 issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
                 self.logger.info(
                     "章节校验失败，准备重试",
-                    extra={"chapter_index": ci, "attempt": attempt, **issue},
+                    extra={
+                        "chapter_index": chapter_index,
+                        "chapter_path": chapter_path,
+                        "attempt": attempt,
+                        **issue,
+                    },
                 )
                 if attempt >= max_attempts:
                     self.logger.error(
                         "章节校验连续失败",
-                        extra={"chapter_index": ci, "attempt": attempt, "error": str(err), **issue},
+                        extra={
+                            "chapter_index": chapter_index,
+                            "chapter_path": chapter_path,
+                            "attempt": attempt,
+                            "error": str(err),
+                            **issue,
+                        },
                     )
                     raise ValueError("章节校验连续失败") from err
 
         assert pgs is not None
 
-        # 段落并发：截图→九宫格→多模态→高清
-        def _decorate_with_images(para: Paragraph, base_dir: Path, label: str | None = None,
-                                  para_index: int | None = None) -> None:
-            # 生成九宫格并选择
+        def _decorate_with_images(
+                para: Paragraph,
+                base_dir: Path,
+                label: str | None = None,
+                para_index: int | None = None,
+        ) -> None:
             timestamps = generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
             thumbs_dir = base_dir / "thumbs"
             grid_path = base_dir / "grid.jpg"
@@ -602,43 +655,47 @@ class NoteGenerator:
             try:
                 with self._thumb_sem:
                     self.screenshotter.compose_grid_one_shot(
-                        Path(meta.video_path), timestamps, grid_path,
+                        Path(meta.video_path),
+                        timestamps,
+                        grid_path,
                         cols=self.cfg.screenshot.grid_columns,
                         rows=self.cfg.screenshot.grid_rows,
                         width=self.cfg.screenshot.low_width,
                         height=self.cfg.screenshot.low_height,
                     )
             except Exception as e:
-                # 回退方案：逐帧缩略图 + PIL 拼图
-                self.logger.info("一把流九宫格失败，将回退逐帧", extra={
-                    "chapter_index": ci,
-                    "para_index": para_index or 0,
-                    "sub_index": label or "",
-                    "error": str(e),
-                })
+                self.logger.info(
+                    "一把流九宫格失败，将回退逐帧",
+                    extra={
+                        "chapter_index": chapter_index,
+                        "chapter_path": chapter_path,
+                        "para_index": para_index or 0,
+                        "sub_index": label or "",
+                        "error": str(e),
+                    },
+                )
                 with self._thumb_sem:
                     thumbs = self.screenshotter.capture_thumbs(Path(meta.video_path), timestamps, thumbs_dir)
                     self.screenshotter.compose_grid(thumbs, grid_path)
-            self.logger.info("生成九宫格完成", extra={
-                "chapter_index": ci,
-                "para_index": para_index or 0,
-                "sub_index": label or "",
-                "grid": str(grid_path),
-                "cost_ms": int((perf_counter() - t_s) * 1000),
-            })
-            chosen_idx = self._choose_best_frame(para, grid_path, ci, para_index or 0, subpath=label)
+            self.logger.info(
+                "生成九宫格完成",
+                extra={
+                    "chapter_index": chapter_index,
+                    "chapter_path": chapter_path,
+                    "para_index": para_index or 0,
+                    "sub_index": label or "",
+                    "grid": str(grid_path),
+                    "cost_ms": int((perf_counter() - t_s) * 1000),
+                },
+            )
+            chosen_idx = self._choose_best_frame(para, grid_path, chapter_index, para_index or 0, subpath=label)
             chosen_ts = timestamps[chosen_idx - 1]
 
-            # 高清重拍
-            # 高清截图文件名：视频名称_段落标题_时间戳（去除符号），如 11:11:11 -> 111111
             def _sanitize_filename(name: str) -> str:
-                """将任意字符串转换为安全文件名：移除非法字符并将空白替换为下划线。"""
                 import re
-                # 去除路径分隔与常见非法字符
+
                 name = re.sub(r"[\\/\\?%\*:|\"<>]", "", name)
-                # 替换空白为下划线，收尾裁剪
                 name = re.sub(r"\s+", "_", name).strip("._ ")
-                # 控制长度，过长时截断
                 return name[:150] or "untitled"
 
             def _format_ts_hhmmss(ts: float) -> str:
@@ -653,18 +710,11 @@ class NoteGenerator:
             safe_title = _sanitize_filename(para.title or "")
             safe_video = _sanitize_filename(video_stem)
             hi_name = f"{safe_video}_{safe_title}_{ts_str}.jpg"
-            # 高清图输出位置：
-            # - 若 GUI 配置了截图目录（note.screenshot_dir），则写入该目录；
-            # - 否则仍写入任务输出目录（base_dir）。
-            hi_root = None
             try:
-                hi_root = getattr(getattr(self.cfg, 'note', None), 'screenshot_dir', None)
+                hi_root = getattr(getattr(self.cfg, "note", None), "screenshot_dir", None)
             except Exception:
                 hi_root = None
-            if hi_root:
-                out_root = Path(hi_root)
-            else:
-                out_root = base_dir
+            out_root = Path(hi_root) if hi_root else base_dir
             try:
                 out_root.mkdir(parents=True, exist_ok=True)
             except Exception:
@@ -673,15 +723,19 @@ class NoteGenerator:
             t_hq = perf_counter()
             with self._shot_sem:
                 self.screenshotter.capture_high_quality(Path(meta.video_path), chosen_ts, hi_path)
-            self.logger.info("高清重拍完成", extra={
-                "chapter_index": ci,
-                "para_index": para_index or 0,
-                "sub_index": label or "",
-                "chosen_index": chosen_idx,
-                "timestamp_sec": chosen_ts,
-                "hi_image": str(hi_path),
-                "cost_ms": int((perf_counter() - t_hq) * 1000),
-            })
+            self.logger.info(
+                "高清重拍完成",
+                extra={
+                    "chapter_index": chapter_index,
+                    "chapter_path": chapter_path,
+                    "para_index": para_index or 0,
+                    "sub_index": label or "",
+                    "chosen_index": chosen_idx,
+                    "timestamp_sec": chosen_ts,
+                    "hi_image": str(hi_path),
+                    "cost_ms": int((perf_counter() - t_hq) * 1000),
+                },
+            )
             para.image = ParagraphImage(
                 grid_image_path=grid_path,
                 grid_timestamps_sec=timestamps,
@@ -690,7 +744,6 @@ class NoteGenerator:
                 hi_res_image_path=hi_path,
             )
 
-            # 递归处理子段落（在父段落任务内顺序执行，避免爆炸并发）
             if para.children:
                 for si, child in enumerate(para.children, start=1):
                     child_dir = base_dir / f"sub_{si}"
@@ -698,21 +751,17 @@ class NoteGenerator:
                     _decorate_with_images(child, child_dir, sub_label, para_index=para_index)
 
         def _process_para(pi: int, ps: ParagraphSchema) -> Paragraph:
-            # 递归转换
-            # 按 GUI 选择的笔记模式决定是否回填原文：
-            # - 字幕模式（subtitle）：回填 text
-            # - AI 笔记模式（optimized）：不回填 text，保持为空
             mode = getattr(getattr(self.cfg, "note", None), "mode", "subtitle")
-            backfill = (mode == "subtitle")
+            backfill = mode == "subtitle"
             line_lookup = {s.line_no: s for s in segs}
             para = self._convert_paragraph(ps, line_lookup=line_lookup, backfill_text=backfill)
-            base_dir = task_out_dir / f"chapter_{ci}" / f"para_{pi}"
+            base_dir = chapter_dir / f"para_{pi}"
             _decorate_with_images(para, base_dir, None, para_index=pi)
             return para
 
         paragraphs: List[Paragraph] = [None] * len(pgs.paragraphs)  # type: ignore[list-item]
         with ThreadPoolExecutor(max_workers=max(1, self.cfg.screenshot.max_workers)) as ex:
-            future_map = {}
+            future_map: Dict[Any, int] = {}
             for idx, ps in enumerate(pgs.paragraphs, start=1):
                 fut = ex.submit(_process_para, idx, ps)
                 future_map[fut] = idx
@@ -720,13 +769,96 @@ class NoteGenerator:
                 idx = future_map[fut]
                 paragraphs[idx - 1] = fut.result()
 
-        chapter = Chapter(
-            title=cb.title,
+        return Chapter(
+            title=title,
             start_sec=min(s.start_sec for s in segs),
             end_sec=max(s.end_sec for s in segs),
             paragraphs=paragraphs,  # type: ignore[arg-type]
+            children=[],
         )
-        return chapter
+
+    def _process_chapter_node(
+            self,
+            index_path: Tuple[int, ...],
+            title: str,
+            segs: List[SubtitleSegment],
+            meta: GenerationInputMeta,
+            task_out_dir: Path,
+    ) -> Chapter:
+        if not segs:
+            raise ValueError(f"章节无内容：{title}")
+
+        chapter_index = index_path[0]
+        chapter_path = ".".join(str(i) for i in index_path)
+        char_count = self._segment_char_count(segs)
+        start_sec = min(s.start_sec for s in segs)
+        end_sec = max(s.end_sec for s in segs)
+
+        self.logger.info(
+            "处理章节",
+            extra={
+                "chapter_index": chapter_index,
+                "chapter_path": chapter_path,
+                "title": title,
+                "segments": len(segs),
+                "char_count": char_count,
+            },
+        )
+
+        if self._should_resplit_chapter(segs):
+            self.logger.info(
+                "章节字符数超出阈值，启动细分",
+                extra={
+                    "chapter_index": chapter_index,
+                    "chapter_path": chapter_path,
+                    "char_count": char_count,
+                    "threshold": self._chapter_char_threshold,
+                },
+            )
+            sub_meta = self._build_sub_meta(meta, segs)
+            sub_boundaries = self._prompt_for_chapters(sub_meta)
+            parent_range = (min(s.line_no for s in segs), max(s.line_no for s in segs))
+            ranges = [(c.start_line_no, c.end_line_no) for c in sub_boundaries.chapters]
+            has_effective_split = len(ranges) > 1 and any(r != parent_range for r in ranges)
+
+            if has_effective_split:
+                children: List[Chapter] = []
+                for child_idx, child_cb in enumerate(sub_boundaries.chapters, start=1):
+                    child_segs = self._select_lines(segs, child_cb.start_line_no, child_cb.end_line_no)
+                    if not child_segs:
+                        raise ValueError(f"子章节无内容：{child_cb}")
+                    child = self._process_chapter_node(
+                        index_path + (child_idx,),
+                        child_cb.title,
+                        child_segs,
+                        meta,
+                        task_out_dir,
+                    )
+                    children.append(child)
+
+                return Chapter(
+                    title=title,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    paragraphs=[],
+                    children=children,
+                )
+
+            self.logger.info(
+                "子章节拆分未产生更小区间，继续按段落生成",
+                extra={
+                    "chapter_index": chapter_index,
+                    "chapter_path": chapter_path,
+                    "char_count": char_count,
+                    "threshold": self._chapter_char_threshold,
+                },
+            )
+
+        return self._process_leaf_chapter(index_path, title, segs, meta, task_out_dir)
+
+    def _process_chapter(self, ci: int, cb: ChapterBoundary, meta: GenerationInputMeta, task_out_dir: Path) -> Chapter:
+        segs = self._select_lines(meta.subtitle.items, cb.start_line_no, cb.end_line_no)
+        return self._process_chapter_node((ci,), cb.title, segs, meta, task_out_dir)
 
     def generate(self, meta: GenerationInputMeta, task_out_dir: Path) -> Note:
         # 1) 分章
