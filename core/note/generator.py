@@ -561,11 +561,6 @@ class NoteGenerator:
         if not segs:
             raise ValueError(f"章节无内容：{cb}")
 
-        chapter_min_sec = min(s.start_sec for s in segs)
-        chapter_max_sec = max(s.end_sec for s in segs)
-        chapter_min_line = min(s.line_no for s in segs)
-        chapter_max_line = max(s.line_no for s in segs)
-
         # 分段（业务重试，最多3次）
         max_attempts = 3
         pgs: ParagraphsSchema | None = None
