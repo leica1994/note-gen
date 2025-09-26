@@ -410,6 +410,16 @@ class MainWindow(QtWidgets.QMainWindow):
         row_shot_input_layout.addWidget(self.edit_screenshot_dir)
         row_shot_input_layout.addWidget(self.btn_pick_screenshot_dir)
         note_layout.addRow("截图目录", row_shot_input)
+
+        self.spin_note_resegment = QtWidgets.QSpinBox()
+        self.spin_note_resegment.setRange(0, 2147483647)
+        try:
+            threshold_val = int(getattr(self.cfg.note, 'chapter_resegment_char_threshold', 1000))
+        except Exception:
+            threshold_val = 6000
+        self.spin_note_resegment.setValue(threshold_val)
+        self.spin_note_resegment.setToolTip("当章节字数超过该阈值时自动再次细分，0 表示关闭自动细分")
+        note_layout.addRow("章节重分段阈值(字符)", self.spin_note_resegment)
         bottom_tabs.addTab(tab_note, "笔记参数配置")
 
         # 左侧组装
@@ -456,6 +466,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 放开并发上限：在构建时已设置为 1..2147483647（仅最小值限制）
 
+
     def _connect_signals(self):
         # 左侧：模式切换与选择输入
         self.radio_mode_file.toggled.connect(self._update_pick_button_text)
@@ -489,6 +500,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 新增：笔记/截图目录变更与选择
         self.edit_note_dir.textChanged.connect(self._schedule_save_config)
         self.edit_screenshot_dir.textChanged.connect(self._schedule_save_config)
+        self.spin_note_resegment.valueChanged.connect(self._schedule_save_config)
         self.btn_pick_note_dir.clicked.connect(self._pick_note_dir)
         self.btn_pick_screenshot_dir.clicked.connect(self._pick_screenshot_dir)
         # 右侧任务表：双击打开输出目录（笔记目录优先）
@@ -900,10 +912,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.text_llm.base_url = self.edit_base_url.text() or None
             self.cfg.text_llm.api_key = self.edit_api_key.text() or None
             self.cfg.text_llm.model = self.edit_model.text()
-            # 0 表示未设置，持久化为 None；否则写入整数值
             v_text_mt = int(self.spin_text_max_tokens.value())
             self.cfg.text_llm.max_tokens = None if v_text_mt == 0 else v_text_mt
-            # 请求超时（秒）
             try:
                 self.cfg.text_llm.request_timeout = int(self.spin_text_timeout.value())
             except Exception:
@@ -919,23 +929,24 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self.cfg.mm_llm.concurrency = int(self.spin_mm_conc.value())
-            # 笔记模式
             data = self.combo_note_mode.currentData()
             mode = data if isinstance(data, str) else 'subtitle'
-            # 若缺少 note 字段，补默认
             if not getattr(self.cfg, 'note', None):
                 from core.config.schema import NoteConfig
                 self.cfg.note = NoteConfig()
             self.cfg.note.mode = mode
-            # 保存笔记目录与截图目录
             txt_note_dir = (self.edit_note_dir.text() or '').strip()
             self.cfg.note.note_dir = Path(txt_note_dir) if txt_note_dir else None
             txt_shot_dir = (self.edit_screenshot_dir.text() or '').strip()
             self.cfg.note.screenshot_dir = Path(txt_shot_dir) if txt_shot_dir else None
+            try:
+                self.cfg.note.chapter_resegment_char_threshold = int(self.spin_note_resegment.value())
+            except Exception:
+                pass
             ConfigCache().save(self.cfg)
         except Exception:
-            # 静默失败，不打断用户操作；关闭时会再尝试
             pass
+
 
     def _pick_note_dir(self):
         """选择笔记目录（Markdown 输出根目录）。"""

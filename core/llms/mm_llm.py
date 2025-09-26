@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from pathlib import Path
 from typing import Type, TypeVar
 
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from core.config.schema import MultiModalConfig
-from core.utils.retry import RetryPolicy, classify_http_exception
-
 T = TypeVar("T", bound=BaseModel)
 
 
 class MultiModalLLM:
-    """多模态 LLM 封装：传入文本与图片（URL 或 base64）。"""
+    """多模态 LLM 封装：传入文字与图片（URL 或 base64）。"""
 
     def __init__(self, cfg: MultiModalConfig) -> None:
         self.cfg = cfg
@@ -28,8 +27,6 @@ class MultiModalLLM:
             max_tokens=cfg.max_tokens,
             timeout=cfg.request_timeout,
         )
-        # 统一重试策略：任意异常最多重试 5 次，退避 2s
-        self._retry = RetryPolicy(max_retries=5)
 
     def _image_block(self, image_path: str) -> dict:
         if self.cfg.use_base64_image:
@@ -57,76 +54,28 @@ class MultiModalLLM:
         ]
         msg = HumanMessage(content=blocks)
         model_with_schema = self._model.with_structured_output(schema)
-
-        @self._retry
-        def _invoke() -> T:
-            log.info("调用多模态 LLM（结构化输出）", extra={"schema": schema.__name__, "image": image_path})
-            return model_with_schema.invoke([msg])  # type: ignore[return-value]
-
-        # 外层增加结构化解析容错重试（最多 3 次）；HTTP 类错误的重试由装饰器处理
-        last_err: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                return _invoke()
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                # 装饰器已对 429/5xx/timeout 执行过退避与重试；若仍抛出则直接跳出
-                category = classify_http_exception(e)
-                if category is not None:
-                    break
-                # 结构化解析/校验异常重试（常见于返回带 ```json 围栏的内容）
-                msg_text = str(e)
-                is_parse_error = isinstance(e, ValidationError) or (
-                        "json_invalid" in msg_text or "Invalid JSON" in msg_text or "validation error" in msg_text
-                )
-                if is_parse_error and attempt < 3:
-                    log.info("结构化解析失败，准备重试", extra={"attempt": attempt, "max": 3})
-                    continue
-                break
-        assert last_err is not None
-        raise last_err
+        log.info(
+            "调用多模态 LLM（结构化输出）",
+            extra={"schema": schema.__name__, "image": image_path},
+        )
+        return model_with_schema.invoke([msg])  # type: ignore[return-value]
 
     def choose_index(self, instruction: str, image_path: str) -> int:
-        """将九宫格图与文字说明一起发送，要求模型只返回 1..9 的数字。
-
-        - 不使用结构化输出，避免多模态端点的 JSON 解析不稳定问题。
-        - 对非数字响应进行至多 3 次解析重试；HTTP/429/5xx 的退避与重试由 RetryPolicy 处理。
-        - 提示词建议在调用侧进一步强调“只返回一个数字，不要任何其他字符/空格/换行”。
-        """
+        """将九宫格图与文字说明一起发送，要求模型只返回 1..9 的数字。"""
         log = logging.getLogger("note_gen.llms.mm")
         blocks = [
             {"type": "text", "text": instruction},
             self._image_block(image_path),
         ]
         msg = HumanMessage(content=blocks)
-
-        @self._retry
-        def _invoke_text() -> str:
-            log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path})
-            resp = self._model.invoke([msg])
-            content = getattr(resp, "content", None)
-            if isinstance(content, str):
-                return content.strip()
-            return str(content)
-
-        import re
-
-        last_err: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                text = _invoke_text()
-                m = re.search(r"([1-9])", text)
-                if not m:
-                    raise ValueError(f"非数字响应：{text!r}")
-                return int(m.group(1))
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                category = classify_http_exception(e)
-                if category is not None:
-                    break
-                if attempt < 3:
-                    log.info("解析数字失败，准备重试", extra={"attempt": attempt, "max": 3})
-                    continue
-                break
-        assert last_err is not None
-        raise last_err
+        log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path})
+        resp = self._model.invoke([msg])
+        content = getattr(resp, "content", None)
+        if isinstance(content, str):
+            text = content.strip()
+        else:
+            text = str(content)
+        m = re.search(r"([1-9])", text)
+        if not m:
+            raise ValueError(f"非数字响应：{text!r}")
+        return int(m.group(1))

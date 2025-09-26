@@ -82,13 +82,10 @@ class NoteConfig(BaseModel):
     """
 
     mode: Literal["subtitle", "optimized"] = Field(default="subtitle", description="笔记模式")
-    # 目录配置：
-    # - note_dir：若设置，则 Markdown 输出写入该目录；否则回退至 export.outputs_root。
-    # - screenshot_dir：若设置，则高清截图输出写入该目录；否则回退至 export.outputs_root/<task_id>。
     note_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
-    screenshot_dir: Optional[Path] = Field(default=None, description="截图目录（高清截图输出优先覆盖）")
+    screenshot_dir: Optional[Path] = Field(default=None, description="截图目录（高清重拍输出优先覆盖）")
     chapter_resegment_char_threshold: int = Field(
-        default=6000,
+        default=1000,
         ge=0,
         description="单章字符阈值；超过该阈值时自动细分子章节，0 表示禁用",
     )
