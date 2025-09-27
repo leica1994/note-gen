@@ -37,7 +37,7 @@ class MarkdownExporter:
             lines.append(f"# 第{index_path[0]}章 {chapter.title}")
         else:
             hashes = "#" * level
-            lines.append(f"{hashes} 第{idx_label}节 {chapter.title}")
+            lines.append(f"{hashes} {idx_label} {chapter.title}")
 
         if chapter.paragraphs:
             lines.extend(self._render_paragraphs(heading_level + 1, idx_label, chapter.paragraphs))
