@@ -1043,6 +1043,7 @@ class NoteGenerator:
         meta: GenerationInputMeta,
     ) -> None:
         video_path = Path(meta.video_path)
+        video_stem = self._sanitize_filename(video_path.stem, allow_empty=True)
         note_cfg = getattr(self.cfg, "note", None)
         hi_root = getattr(note_cfg, "screenshot_dir", None)
         for task in tasks:
@@ -1051,8 +1052,14 @@ class NoteGenerator:
             timestamps = task.timestamps or []
             if not timestamps:
                 continue
-            raw_name = f"{Path(meta.video_path).stem}_{task.paragraph.title}_{self._format_ts_hhmmss(task.chosen_timestamp)}"
-            hi_name = self._sanitize_filename(raw_name) + ".jpg"
+            name_parts = [
+                video_stem,
+                self._sanitize_filename(task.paragraph.title or "", allow_empty=True),
+                self._format_ts_hhmmss(task.chosen_timestamp),
+            ]
+            hi_base = "_".join(part for part in name_parts if part)
+            # 分段净化名称，确保空格与特殊字符统一处理
+            hi_name = self._sanitize_filename(hi_base) + ".jpg"
             out_root = Path(hi_root) if hi_root else task.base_dir
             try:
                 out_root.mkdir(parents=True, exist_ok=True)
@@ -1085,10 +1092,15 @@ class NoteGenerator:
         return para.image
 
     @staticmethod
-    def _sanitize_filename(name: str) -> str:
-        sanitized = re.sub(r"[\\\\/\\\\?%\\*:|\\\"<>]", "", name)
-        sanitized = re.sub(r"\\s+", "_", sanitized).strip("._ ")
-        return sanitized[:150] or "untitled"
+    def _sanitize_filename(name: str, *, allow_empty: bool = False) -> str:
+        """过滤非法字符并统一空格为下划线，保持可追溯的命名。"""
+        sanitized = re.sub(r"[\\/\?%\\*:|\"<>]", "", name)
+        sanitized = re.sub(r"[\s\u3000]+", "_", sanitized)
+        sanitized = re.sub(r"_+", "_", sanitized)
+        sanitized = sanitized.strip("._ ")
+        if not sanitized:
+            return "" if allow_empty else "untitled"
+        return sanitized[:150]
 
     @staticmethod
     def _format_ts_hhmmss(ts: float) -> str:
