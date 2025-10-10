@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from core.config.schema import LLMConfig
 from core.llms.concurrency import ConcurrencyLimiter
+from core.utils.retry import RetryPolicy
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -18,6 +19,7 @@ class TextLLM:
     def __init__(self, cfg: LLMConfig) -> None:
         self.cfg = cfg
         self._limiter = ConcurrencyLimiter(cfg.concurrency)
+        self._retry = RetryPolicy()
         self._model = ChatOpenAI(
             api_key=cfg.api_key,
             base_url=cfg.base_url,
@@ -32,21 +34,25 @@ class TextLLM:
         log = logging.getLogger("note_gen.llms.text")
         log.info("调用文本 LLM（结构化输出）", extra={"json_mode": json_mode, "schema": schema.__name__})
 
-        def _call() -> T:
+        def inner_call() -> T:
             if json_mode:
                 model_with_schema = self._model.with_structured_output(schema, method="json_mode")
             else:
                 model_with_schema = self._model.with_structured_output(schema)
             return model_with_schema.invoke(prompt_messages)  # type: ignore[return-value]
 
-        return self._limiter.run(_call)
+        @self._retry
+        def attempt() -> T:
+            return self._limiter.run(inner_call)
+
+        return attempt()
 
     def invoke(self, prompt_messages: list) -> str:
         """以普通文本形式执行调用，返回模型原始内容。"""
         log = logging.getLogger("note_gen.llms.text")
         log.info("调用文本 LLM（普通输出）")
 
-        def _call() -> str:
+        def inner_call() -> str:
             message = self._model.invoke(prompt_messages)
             if isinstance(message, BaseMessage):
                 content = message.content
@@ -58,4 +64,8 @@ class TextLLM:
                 raise ValueError("模型返回内容为空或类型异常")
             return content
 
-        return self._limiter.run(_call)
+        @self._retry
+        def attempt() -> str:
+            return self._limiter.run(inner_call)
+
+        return attempt()

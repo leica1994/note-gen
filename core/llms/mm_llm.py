@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from core.config.schema import MultiModalConfig
 from core.llms.concurrency import ConcurrencyLimiter
+from core.utils.retry import RetryPolicy
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -22,6 +23,7 @@ class MultiModalLLM:
     def __init__(self, cfg: MultiModalConfig) -> None:
         self.cfg = cfg
         self._limiter = ConcurrencyLimiter(cfg.concurrency)
+        self._retry = RetryPolicy()
         self._model = ChatOpenAI(
             api_key=cfg.api_key,
             base_url=cfg.base_url,
@@ -61,11 +63,15 @@ class MultiModalLLM:
             extra={"schema": schema.__name__, "image": image_path},
         )
 
-        def _call() -> T:
+        def inner_call() -> T:
             model_with_schema = self._model.with_structured_output(schema)
             return model_with_schema.invoke([msg])  # type: ignore[return-value]
 
-        return self._limiter.run(_call)
+        @self._retry
+        def attempt() -> T:
+            return self._limiter.run(inner_call)
+
+        return attempt()
 
     def choose_index(self, instruction: str, image_path: str) -> int:
         """将九宫格图与文字说明一起发送，要求模型只返回 1..9 的数字。"""
@@ -77,7 +83,7 @@ class MultiModalLLM:
         msg = HumanMessage(content=blocks)
         log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path})
 
-        def _call() -> int:
+        def inner_call() -> int:
             resp = self._model.invoke([msg])
             content = getattr(resp, "content", None)
             if isinstance(content, str):
@@ -89,4 +95,8 @@ class MultiModalLLM:
                 raise ValueError(f"非数字响应：{text!r}")
             return int(m.group(1))
 
-        return self._limiter.run(_call)
+        @self._retry
+        def attempt() -> int:
+            return self._limiter.run(inner_call)
+
+        return attempt()
