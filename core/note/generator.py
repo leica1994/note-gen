@@ -67,9 +67,7 @@ class NoteGenerator:
         self.mm_llm = MultiModalLLM(config.mm_llm)
         self.screenshotter = Screenshotter(config.screenshot)
         self.logger = logger or logging.getLogger("note_gen.generator")
-        # 并发与限流：
-        self._text_sem = threading.Semaphore(max(1, self.cfg.text_llm.concurrency))
-        self._mm_sem = threading.Semaphore(max(1, self.cfg.mm_llm.concurrency))
+        # 截图相关信号量
         self._thumb_sem = threading.Semaphore(max(1, self.cfg.screenshot.max_workers))
         self._shot_sem = threading.Semaphore(1)
         self._chapter_char_threshold = max(
@@ -402,8 +400,7 @@ class NoteGenerator:
             {content_lines}
             """
         ))
-        with self._text_sem:
-            return self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
+        return self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
 
     def _extract_json_object(self, text: str) -> str:
         if text is None:
@@ -608,8 +605,7 @@ class NoteGenerator:
             {text}
             """
         )
-        with self._mm_sem:
-            chosen = self.mm_llm.choose_index(instruction, str(grid_path))
+        chosen = self.mm_llm.choose_index(instruction, str(grid_path))
         return int(chosen)
 
     def _convert_paragraph(
