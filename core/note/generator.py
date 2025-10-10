@@ -8,7 +8,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from textwrap import dedent
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Dict, Iterable, List, Set, Tuple
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -31,6 +31,7 @@ from core.screenshot.ffmpeg import Screenshotter
 from core.screenshot.grid import generate_grid_timestamps
 from core.subtitles.models import SubtitleDocument, SubtitleSegment
 
+from core.utils.retry import RetryPolicy
 
 from dataclasses import dataclass, field
 
@@ -67,6 +68,7 @@ class NoteGenerator:
         self.mm_llm = MultiModalLLM(config.mm_llm)
         self.screenshotter = Screenshotter(config.screenshot)
         self.logger = logger or logging.getLogger("note_gen.generator")
+        self._chapter_retry = RetryPolicy()
         # 截图相关信号量
         self._thumb_sem = threading.Semaphore(max(1, self.cfg.screenshot.max_workers))
         self._shot_sem = threading.Semaphore(1)
@@ -210,39 +212,57 @@ class NoteGenerator:
             {self._render_all_subtitles(meta)}
             """
         ))
-        t_attempt = perf_counter()
-        result = self.text_llm.structured_invoke(ChaptersSchema, [sys, human], json_mode=False)
+        max_attempts = self._chapter_retry.max_retries + 1
+        attempts = 0
+        last_err: Exception | None = None
 
         def _has_cjk(s: str) -> bool:
             return any('\u4e00' <= ch <= '\u9fff' for ch in s)
 
-        for idx, ch in enumerate(result.chapters, start=1):
-            if not ch.title or not _has_cjk(ch.title):
-                ch.title = f"第{idx}章"
+        while attempts < max_attempts:
+            attempts += 1
+            t_attempt = perf_counter()
+            result: ChaptersSchema | None = None
+            try:
+                result = self.text_llm.structured_invoke(ChaptersSchema, [sys, human], json_mode=False)
 
-        try:
-            self._validate_chapters(meta, result)
-        except Exception as err:
-            self.logger.error(
-                "分章校验失败",
-                extra={
-                    "attempt": 1,
-                    "chapters": len(result.chapters),
-                    "cost_ms": int((perf_counter() - t_attempt) * 1000),
+                for idx, ch in enumerate(result.chapters, start=1):
+                    if not ch.title or not _has_cjk(ch.title):
+                        ch.title = f"第{idx}章"
+
+                self._validate_chapters(meta, result)
+
+                cost_ms = int((perf_counter() - t_attempt) * 1000)
+                self.logger.info(
+                    "分章完成",
+                    extra={
+                        "chapters": [chapter.title for chapter in result.chapters],
+                        "attempt": attempts,
+                        "cost_ms": cost_ms,
+                    },
+                )
+                return result
+            except Exception as err:
+                last_err = err
+                cost_ms = int((perf_counter() - t_attempt) * 1000)
+                log_extra = {
+                    "attempt": attempts,
+                    "max": max_attempts,
+                    "cost_ms": cost_ms,
                     "error": str(err),
-                },
-            )
-            raise
+                }
+                if result is not None:
+                    log_extra["chapters"] = len(result.chapters)
 
-        self.logger.info(
-            "分章完成",
-            extra={
-                "chapters": [chapter.title for chapter in result.chapters],
-                "attempt": 1,
-                "cost_ms": int((perf_counter() - t_attempt) * 1000),
-            },
-        )
-        return result
+                if attempts >= max_attempts:
+                    self.logger.error("分章校验失败", extra=log_extra)
+                    raise
+
+                self.logger.warning("分章失败，准备重试", extra=log_extra)
+                sleep(2)
+
+        assert last_err is not None
+        raise last_err
 
     def _validate_chapters(self, meta: GenerationInputMeta, chs: ChaptersSchema) -> None:
         expected_lines = [s.line_no for s in meta.subtitle.items]
