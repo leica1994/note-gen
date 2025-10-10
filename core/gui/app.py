@@ -1205,6 +1205,44 @@ class MainWindow(QtWidgets.QMainWindow):
         QLineEdit, QSpinBox, QComboBox { background: #2B2F33; border: 1px solid #3A3D41; border-radius: 4px; padding: 4px 6px; }
         QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border: 1px solid #4EA1FF; }
 
+        /* 单选框 */
+        QRadioButton { spacing: 6px; }
+        QRadioButton::indicator {
+            width: 15px;
+            height: 15px;
+            border: 2px solid #5C6167;
+            border-radius: 8px;
+            background: #1F2023;
+        }
+        QRadioButton::indicator:hover {
+            border-color: #7AAFFF;
+        }
+        QRadioButton::indicator:checked {
+            background: #4EA1FF;
+            border-color: #4EA1FF;
+        }
+
+        /* 复选框 */
+        QCheckBox { spacing: 6px; }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #5C6167;
+            border-radius: 4px;
+            background: #1F2023;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7AAFFF;
+        }
+        QCheckBox::indicator:checked {
+            background: #4EA1FF;
+            border-color: #4EA1FF;
+        }
+        QCheckBox::indicator:checked:hover {
+            background: #64B4FF;
+            border-color: #64B4FF;
+        }
+
         /* 按钮 */
         QPushButton { background: #3A3D41; border: 1px solid #474B50; border-radius: 6px; padding: 6px 12px; }
         QPushButton:hover { background: #454A50; }
