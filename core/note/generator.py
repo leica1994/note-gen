@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import json
 import re
 import threading
 from collections import Counter
@@ -9,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from textwrap import dedent
 from time import perf_counter, sleep
-from typing import Any, Dict, Iterable, List, Set, Tuple
+from typing import Any, Dict, List, Tuple
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -23,7 +22,11 @@ from core.note.models import (
     GenerationInputMeta,
     Note,
     Paragraph,
+    ParagraphBoundary,
     ParagraphImage,
+    ParagraphLine,
+    ParagraphOptimizationSchema,
+    ParagraphPlan,
     ParagraphSchema,
     ParagraphsSchema,
 )
@@ -69,6 +72,7 @@ class NoteGenerator:
         self.screenshotter = Screenshotter(config.screenshot)
         self.logger = logger or logging.getLogger("note_gen.generator")
         self._chapter_retry = RetryPolicy()
+        self._paragraph_retry = RetryPolicy()
         # 截图相关信号量
         self._thumb_sem = threading.Semaphore(max(1, self.cfg.screenshot.max_workers))
         self._shot_sem = threading.Semaphore(1)
@@ -89,43 +93,6 @@ class NoteGenerator:
         for seg in segs:
             lines.append(f"{seg.line_no}\t[{seg.start_sec:.3f}-{seg.end_sec:.3f}]\t{seg.text}")
         return "\n".join(lines)
-
-    @staticmethod
-    def _summarize_paragraph_issue(issue: Dict[str, Any], err: Exception) -> str:
-        parts = [f"校验异常：{err}"]
-        missing = issue.get("missing") or []
-        extra = issue.get("extra") or []
-        dup = issue.get("duplicate") or []
-        overlap = issue.get("overlap")
-        boundary = issue.get("boundary_mismatch")
-        if missing:
-            parts.append(f"缺失行号样例：{missing[:10]}")
-        if extra:
-            parts.append(f"多余行号样例：{extra[:10]}")
-        if dup:
-            parts.append(f"重复行号样例：{dup[:10]}")
-        if overlap:
-            parts.append("段落时间存在重叠")
-        if boundary:
-            parts.append(f"边界不一致段落数量：{boundary}")
-        return "\n".join(parts)
-
-    @staticmethod
-    def _paragraphs_to_prompt_json(model: ParagraphsSchema, seg_lookup: Dict[int, SubtitleSegment]) -> dict:
-        def convert(node: ParagraphSchema) -> dict:
-            data = node.model_dump()
-            lines = data.get("lines") or []
-            for line in lines:
-                seg = seg_lookup.get(line.get("line_no"))
-                if seg is not None:
-                    line["text"] = seg.text
-            children = node.children or []
-            data["children"] = [convert(child) for child in children]
-            if "optimized" not in data:
-                data["optimized"] = []
-            return data
-
-        return {"paragraphs": [convert(p) for p in model.paragraphs]}
 
     def _prompt_for_chapters(self, meta: GenerationInputMeta) -> ChaptersSchema:
         """基于完整字幕生成“章节边界”。"""
@@ -352,92 +319,155 @@ class NoteGenerator:
         )
 
     def _prompt_for_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphsSchema:
-        if segs:
-            _min_line = min(s.line_no for s in segs)
-            _max_line = max(s.line_no for s in segs)
-            _total_lines = len(segs)
-            _min_sec = min(s.start_sec for s in segs)
-            _max_sec = max(s.end_sec for s in segs)
-        else:
-            _min_line = 0
-            _max_line = 0
-            _total_lines = 0
-            _min_sec = 0.0
-            _max_sec = 0.0
+        if not segs:
+            raise ValueError("章节无字幕，无法分段")
+
+        seg_lookup = {s.line_no: s for s in segs}
+        try:
+            plan = self._prompt_paragraph_plan(chapter_title, segs)
+            paragraphs = self._build_paragraph_schemas(plan.paragraphs, seg_lookup)
+            return ParagraphsSchema(paragraphs=paragraphs)
+        except Exception as err:
+            self.logger.error(
+                "分段计划生成失败，回退单段结构",
+                extra={
+                    "chapter_title": chapter_title,
+                    "segments": len(segs),
+                    "error": str(err),
+                },
+            )
+            return self._fallback_paragraphs(chapter_title, segs)
+
+    def _prompt_paragraph_plan(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphPlan:
+        min_line = min(s.line_no for s in segs)
+        max_line = max(s.line_no for s in segs)
+        total_lines = len(segs)
+        content_lines = self._render_segments_for_prompt(segs)
+        allowed_ids = "[" + ", ".join(str(s.line_no) for s in segs) + "]"
 
         sys = SystemMessage(content=dedent(
             """
-            你是一名专业的结构化编辑，任务是将章节内的字幕行划分为“段落”，并为每个段落生成 optimized。
+            你是一名结构化编辑，任务是将给定字幕划分为多个段落，仅输出段落的标题与起止行号。
 
-            硬性约束（必须全部满足）：
-            1) 行号一致性与连续性：仅使用输入列表中真实出现的行号；每个行号必须且仅出现一次；整体行号应构成连续整数序列（无间断、无缺失、无重复、无额外）。
-            2) 顶层时间覆盖：顶层段落按时间升序且不重叠，联合完整覆盖章节时间范围 [min_sec, max_sec]（容差 ≤ 0.05s）。
-               - 相邻段落应时间相接：start_sec(i) ≈ end_sec(i-1)；不得出现空洞或交叉。
-            3) 边界=行集合：任意段落 start_sec = 行集合 start_sec 的最小值；end_sec = 行集合 end_sec 的最大值；段落内每行的 [start_sec, end_sec] 必须落在段落边界内（容差 ≤ 0.05s）。
-            4) 排序与结构：段落按时间升序；lines 按行号升序。
-            5) 输出契约：仅返回一个 JSON 对象（不出现额外文字/Markdown），唯一键为 paragraphs，值为 List[段落]。
-               - 段落对象仅包含：title, start_sec, end_sec, lines, children, optimized。
-               - 行对象仅包含：line_no, start_sec, end_sec, text。
-               - lines.*.text 一律为空字符串 ""；禁止回传原文（程序会回填）。
-               - children 若无子段落则为 []；optimized 为 List[str]。
-            6) 字段最小化与结构：禁止输出未定义字段；lines/children 按要求排序。
-
-            内省自检（输出前在你内部完成，不要打印过程）：
-            - 行号校验：收集所有段落 lines 的 line_no 集合，应与输入全集完全相等；计数 Σ(唯一行) = total_lines；重复=0；缺失=0；额外=0。
-            - 连续性校验：并集按升序，两两相邻差值恒为 1。
-            - 时间校验：
-              a) 顶层段落时间范围按升序且不重叠；
-              b) 顶层覆盖：第一个段落 start_sec ≈ min_sec；最后一个段落 end_sec ≈ max_sec；
-              c) 段落边界等于行集合的最小开始/最大结束；所有行时间落入段落边界。
-
-            回退策略：若任何检验未通过，则仅返回 1 个顶层段落：
-            - title:"整体内容概览"
-            - start_sec=min_sec, end_sec=max_sec
-            - lines：包含全部行（按行号升序），每行 start_sec/end_sec 与输入一致，text 一律为空串
-            - children=[]；optimized 可生成为 1~N 条，但不得捏造事实
-
-            optimized 说明：
-            - 为每个段落生成 optimized（List[str]）：去除语气词、添加合理标点后，拼接成流畅句子；
-            - 内容较长可自然分段；可使用 Markdown 标记重点（如 **加粗**、`行内代码`、列表等）；
-            - 严禁捏造未出现在该段落字幕中的事实；保持术语与数字的准确性与时序逻辑。
+            必须遵守：
+            1) 只能使用提供的行号，start_line_no ≤ end_line_no；数字必须为整数。
+            2) 段落按 start_line_no 升序排列，相邻段落应满足 start_line_no(i) = end_line_no(i-1) + 1。
+            3) 所有字幕行需被完整覆盖且仅出现一次；首段起点等于最小行号，末段终点等于最大行号。
+            4) 段落标题需基于该行号区间的内容给出简体中文短句，禁止出现“第N段”之类的序号标签。
+            5) 输出严格为 JSON 对象 {"paragraphs": [{"title": str, "start_line_no": int, "end_line_no": int}, ...]}，不得添加其他字段或文字。
+            6) 至少返回 1 个段落，若无法判断边界，请将全部行归入单段。
             """
         ))
-        content_lines = "\n".join(
-            f"{s.line_no}\t[{s.start_sec:.3f}-{s.end_sec:.3f}]\t{s.text}" for s in segs
-        )
-        allowed_ids = "[" + ", ".join(str(s.line_no) for s in segs) + "]"
         human = HumanMessage(content=dedent(
             f"""
             章节标题：{chapter_title}
-            本章节合法行号范围：{_min_line} - {_max_line}
-            本章节字幕总行数：{_total_lines}
-            本章节时间范围：[{_min_sec:.3f} - {_max_sec:.3f}]
-
+            合法行号范围：{min_line} - {max_line}
+            字幕总行数：{total_lines}
             合法行号全集 S：{allowed_ids}
-            注：S 为从 {_min_line} 到 {_max_line} 的连续整数集合。
-            要求：仅可使用 S 中的行号；并且对所有段落 lines 的并集需“连续、无重复、无缺失、无额外”；段落之间时间不重叠且完整覆盖范围；段落边界应等于其 lines 的最小开始/最大结束；若无法满足全部硬性校验，请按回退策略输出单段结构。
+
+            请给出段落列表，仅包含标题与行号区间：
 
             {content_lines}
             """
         ))
-        return self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
 
-    def _extract_json_object(self, text: str) -> str:
-        if text is None:
-            raise ValueError("LLM 返回为空")
-        cleaned = text.strip()
-        if not cleaned:
-            raise ValueError("LLM 返回为空白")
+        plan = self.text_llm.structured_invoke(ParagraphPlan, [sys, human], json_mode=False)
+        self._validate_paragraph_plan(segs, plan)
+        self.logger.info(
+            "分段计划生成完成",
+            extra={
+                "chapter_title": chapter_title,
+                "paragraphs": len(plan.paragraphs),
+            },
+        )
+        return plan
 
-        fenced = re.search(r"```(?:json)?\\s*(\\{.*?\\})\\s*```", cleaned, re.DOTALL)
-        if fenced:
-            return fenced.group(1).strip()
+    def _validate_paragraph_plan(self, segs: List[SubtitleSegment], plan: ParagraphPlan) -> None:
+        if not plan.paragraphs:
+            raise ValueError("分段计划为空")
 
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and start < end:
-            return cleaned[start:end + 1].strip()
-        return cleaned
+        expected_lines = [s.line_no for s in segs]
+        min_line = min(expected_lines)
+        max_line = max(expected_lines)
+        expected_set = set(expected_lines)
+
+        used_lines: list[int] = []
+        prev_end: int | None = None
+        for node in plan.paragraphs:
+            if node.start_line_no > node.end_line_no:
+                raise ValueError("存在 start_line_no > end_line_no 的段落")
+            if node.start_line_no not in expected_set or node.end_line_no not in expected_set:
+                raise ValueError("段落行号不在合法范围内")
+            if prev_end is not None and node.start_line_no != prev_end + 1:
+                raise ValueError("段落之间未连续衔接")
+            used_lines.extend(range(node.start_line_no, node.end_line_no + 1))
+            prev_end = node.end_line_no
+
+        if plan.paragraphs[0].start_line_no != min_line or plan.paragraphs[-1].end_line_no != max_line:
+            raise ValueError("段落计划未覆盖完整范围")
+
+        used_counter = Counter(used_lines)
+        if sorted(used_counter.keys()) != sorted(expected_set):
+            raise ValueError("段落计划与原始行号集合不一致")
+        duplicates = [ln for ln, cnt in used_counter.items() if cnt > 1]
+        if duplicates:
+            raise ValueError(f"存在重复覆盖的行号：{duplicates[:10]}")
+
+    def _build_paragraph_schemas(
+        self,
+        boundaries: List[ParagraphBoundary],
+        seg_lookup: Dict[int, SubtitleSegment],
+    ) -> List[ParagraphSchema]:
+        return [self._build_paragraph_schema(boundary, seg_lookup) for boundary in boundaries]
+
+    def _build_paragraph_schema(
+        self,
+        boundary: ParagraphBoundary,
+        seg_lookup: Dict[int, SubtitleSegment],
+    ) -> ParagraphSchema:
+        segs: List[SubtitleSegment] = []
+        for line_no in range(boundary.start_line_no, boundary.end_line_no + 1):
+            seg = seg_lookup.get(line_no)
+            if seg is None:
+                raise ValueError(f"找不到行号 {line_no} 对应的字幕")
+            segs.append(seg)
+        if not segs:
+            raise ValueError("段落无字幕内容")
+
+        lines = [
+            ParagraphLine(
+                line_no=seg.line_no,
+                start_sec=seg.start_sec,
+                end_sec=seg.end_sec,
+                text="",
+            )
+            for seg in segs
+        ]
+
+        return ParagraphSchema(
+            title=boundary.title,
+            start_sec=segs[0].start_sec,
+            end_sec=segs[-1].end_sec,
+            lines=lines,
+            children=[],
+        )
+
+    def _fallback_paragraphs(self, chapter_title: str, segs: List[SubtitleSegment]) -> ParagraphsSchema:
+        seg_lookup = {s.line_no: s for s in segs}
+        boundary = ParagraphBoundary(
+            title="整体内容概览",
+            start_line_no=min(seg_lookup.keys()),
+            end_line_no=max(seg_lookup.keys()),
+        )
+        paragraph = self._build_paragraph_schema(boundary, seg_lookup)
+        self.logger.warning(
+            "分段回退为单段",
+            extra={
+                "chapter_title": chapter_title,
+                "segments": len(segs),
+            },
+        )
+        return ParagraphsSchema(paragraphs=[paragraph])
 
     def _validate_time_coverage(self, segs: List[SubtitleSegment], paras: List[ParagraphSchema]) -> None:
         if not paras:
@@ -472,134 +502,6 @@ class NoteGenerator:
             max_line_end = max(l.end_sec for l in p.lines)
             if abs(p.start_sec - min_line_start) > eps or abs(p.end_sec - max_line_end) > eps:
                 raise ValueError("段落边界应等于该段落所有行的最小开始与最大结束")
-
-    def _analyze_coverage_issue(self, segs: List[SubtitleSegment], paras: List[ParagraphSchema]) -> Dict[str, Any]:
-        expect: Set[int] = {s.line_no for s in segs}
-
-        def flatten_lines(ps: List[ParagraphSchema]) -> Iterable[int]:
-            for p in ps:
-                for l in p.lines:
-                    yield l.line_no
-                if p.children:
-                    yield from flatten_lines(p.children)
-
-        got_list = list(flatten_lines(paras))
-        got: Set[int] = set(got_list)
-        duplicate: Set[int] = {x for x in got_list if got_list.count(x) > 1}
-        missing = sorted(list(expect - got))
-        extra = sorted(list(got - expect))
-
-        ranges = sorted([(p.start_sec, p.end_sec) for p in paras], key=lambda x: x[0])
-        overlap = any(ranges[i][0] < ranges[i - 1][1] for i in range(1, len(ranges))) if len(ranges) > 1 else False
-        min_in = min(s.start_sec for s in segs)
-        max_in = max(s.end_sec for s in segs)
-        coverage_ok = bool(ranges) and (abs(ranges[0][0] - min_in) <= 0.05 and abs(ranges[-1][1] - max_in) <= 0.05)
-
-        out_of_bounds = 0
-        for p in paras:
-            min_line_start = min(l.start_sec for l in p.lines) if p.lines else p.start_sec
-            max_line_end = max(l.end_sec for l in p.lines) if p.lines else p.end_sec
-            if not (abs(p.start_sec - min_line_start) <= 0.05 and abs(p.end_sec - max_line_end) <= 0.05):
-                out_of_bounds += 1
-
-        return {
-            "missing": missing,
-            "extra": extra,
-            "duplicate": sorted(list(duplicate)),
-            "overlap": overlap,
-            "coverage_ok": coverage_ok,
-            "boundary_mismatch": out_of_bounds,
-        }
-
-    def _repair_paragraphs(
-        self,
-        chapter_title: str,
-        segs: List[SubtitleSegment],
-        previous: ParagraphsSchema,
-        err: Exception,
-        issue: Dict[str, Any],
-    ) -> ParagraphsSchema:
-        self.logger.info(
-            "章节补偿请求",
-            extra={
-                "chapter_title": chapter_title,
-                "segments": len(segs),
-            },
-        )
-        summary = self._summarize_paragraph_issue(issue, err)
-        missing_lines = issue.get("missing") or []
-        extra_lines = issue.get("extra") or []
-        duplicate_lines = issue.get("duplicate") or []
-        seg_lookup = {s.line_no: s for s in segs}
-        if segs:
-            _min_line = min(seg_lookup)
-            _max_line = max(seg_lookup)
-            _total_lines = len(seg_lookup)
-            _min_sec = min(s.start_sec for s in seg_lookup.values())
-            _max_sec = max(s.end_sec for s in seg_lookup.values())
-        else:
-            _min_line = 0
-            _max_line = 0
-            _total_lines = 0
-            _min_sec = 0.0
-            _max_sec = 0.0
-        allowed_ids = "[" + ", ".join(str(line) for line in sorted(seg_lookup)) + "]"
-        content_lines = self._render_segments_for_prompt(segs)
-        original_json = json.dumps(
-            self._paragraphs_to_prompt_json(previous, seg_lookup),
-            ensure_ascii=False,
-            indent=2,
-        )
-
-        def _fmt(lines: List[int]) -> str:
-            return ", ".join(map(str, lines[:30])) if lines else "无"
-
-        sys = SystemMessage(content=dedent(
-            """
-            你是一名结构化编辑助手。请基于“上一次模型的 JSON 输出”做最小修复，并确保输出通过以下校验：
-            1. 行号只能来自给定字幕且完全覆盖合法全集——不得缺失、重复或多余。
-            2. 段落按时间升序覆盖整个章节时间范围；每个段落 start_sec/end_sec 必须分别等于该段落最小/最大行号的时间。
-            3. 段落与行对象字段严格遵循约定结构，不得增删字段；lines 必须按行号升序。
-            4. 输出只能是 JSON 对象 {"paragraphs": [...]}，严禁附加任何解释或 Markdown。
-            5. optimized 字段是笔记核心摘要，请根据修复后的段落内容重新校正，可使用条列或短句说明重点，务必与段落语义一致。
-            6. 允许合并/拆分段落，但请仅修改存在问题的部分；其它段落应尽量保持不变。
-            7. 输出前请自检：
-               - 汇总所有段落行号，与合法全集逐项对比确认完全一致。
-               - 验证段落时间无重叠、覆盖完整区间。
-               - 确认 optimized 与段落内容匹配且不可为空。
-            """
-        ))
-        human = HumanMessage(content=dedent(
-            f"""
-            章节标题：{chapter_title}
-            校验失败原因：{summary}
-
-            需修复的行号问题：
-            - 缺失行号样例：{_fmt(missing_lines)}
-            - 多余行号样例：{_fmt(extra_lines)}
-            - 重复行号样例：{_fmt(duplicate_lines)}
-
-            上一次模型输出（已为每条 line_no 回填原字幕 text，供比对使用）：
-            ```json
-            {original_json}
-            ```
-
-            修复建议步骤：
-            1) 调整问题段落的 lines，使行号集合与合法全集一致；如需合并/拆分段落请直接修改。
-            2) 校正每个段落的 start_sec/end_sec，使其分别等于段落最小/最大行号的时间，并保证段落间无重叠、覆盖完整。
-            3) 重写或更新受影响段落的 optimized 字段，使内容准确、结构清晰，不得留空。
-            4) 保留其它已正确段落。
-
-            供比对的字幕原文（行号/时间/文本）：
-            合法行号范围：{_min_line} - {_max_line}
-            字幕总行数：{_total_lines}
-            时间范围：[{_min_sec:.3f} - {_max_sec:.3f}]
-            合法行号全集 S：{allowed_ids}
-
-            {content_lines}
-            """
-        ))
-        return self.text_llm.structured_invoke(ParagraphsSchema, [sys, human], json_mode=False)
 
     def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int, subpath: str | None = None) -> int:
         text = "\n".join(f"{s.line_no}: {s.text}" for s in para.lines)
@@ -670,6 +572,101 @@ class NoteGenerator:
 
         _norm_list(paras)
 
+    def _generate_ai_notes_for_paragraphs(
+        self,
+        chapter_title: str,
+        paragraphs: List[ParagraphSchema],
+        line_lookup: Dict[int, SubtitleSegment],
+    ) -> None:
+        for ps in paragraphs:
+            ps.optimized = self._optimize_paragraph_notes(chapter_title, ps, line_lookup)
+            if ps.children:
+                self._generate_ai_notes_for_paragraphs(chapter_title, ps.children, line_lookup)
+
+    def _optimize_paragraph_notes(
+        self,
+        chapter_title: str,
+        paragraph: ParagraphSchema,
+        line_lookup: Dict[int, SubtitleSegment],
+    ) -> List[str]:
+        lines_content: List[str] = []
+        for line in paragraph.lines:
+            seg = line_lookup.get(line.line_no)
+            if seg is None:
+                continue
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+            lines_content.append(text)
+
+        if not lines_content:
+            return []
+
+        lines_text = "\n".join(lines_content)
+
+        sys = SystemMessage(content=dedent(
+            """
+            你是一名字幕整理助手，任务是将给定字幕按语义整理为流畅的笔记语句。
+
+            严格要求：
+            1) 覆盖输入字幕中的全部信息，禁止引入新内容或遗漏原意；可合并多行字幕成一句话，但不得删除重要信息。
+            2) 可补全标点、统一人称或去掉口头语，使语句更书面，但必须保持事实准确。
+            3) 输出为 JSON 对象 {"optimized": [...]}，列表元素按语义顺序排列，每个元素可对应一个整理后的句子/要点。
+            4) 如果需要，可使用 Markdown 列表或加粗等轻量标记突出重点；避免空字符串。
+            5) 在整理时请检查，确保每条字幕的关键信息至少在输出中出现一次。
+            """
+        ))
+        human = HumanMessage(content=dedent(
+            f"""
+            请根据以下字幕正文整理为书面化的笔记句子，合并重复或碎片化的表达，但确保涵盖全部信息：
+            {lines_text}
+            """
+        ))
+
+        max_attempts = self._paragraph_retry.max_retries + 1
+        attempts = 0
+        last_err: Exception | None = None
+
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                result = self.text_llm.structured_invoke(
+                    ParagraphOptimizationSchema,
+                    [sys, human],
+                    json_mode=False,
+                )
+                optimized = [item.strip() for item in result.optimized if item.strip()]
+                self.logger.info(
+                    "段落优化完成",
+                    extra={
+                        "chapter_title": chapter_title,
+                        "paragraph_title": paragraph.title,
+                        "lines": len(lines_content),
+                        "items": len(optimized),
+                        "attempt": attempts,
+                    },
+                )
+                return optimized
+            except Exception as err:
+                last_err = err
+                log_extra = {
+                    "chapter_title": chapter_title,
+                    "paragraph_title": paragraph.title,
+                    "lines": len(lines_content),
+                    "attempt": attempts,
+                    "max": max_attempts,
+                    "error": str(err),
+                }
+                if attempts >= max_attempts:
+                    self.logger.error("段落优化连续失败，将返回空结果", extra=log_extra)
+                    break
+                self.logger.warning("段落优化失败，准备重试", extra=log_extra)
+                sleep(2)
+
+        if last_err is not None:
+            self.logger.debug("段落优化最终异常", extra={"error": str(last_err)})
+        return []
+
     def _schedule_paragraph_render_tasks(
         self,
         paragraph: Paragraph,
@@ -726,75 +723,23 @@ class NoteGenerator:
             pass
 
         pgs = self._prompt_for_paragraphs(title, segs)
-        validated_from = "initial"
-        try:
-            self._normalize_paragraphs(pgs.paragraphs)
-            self._validate_time_coverage(segs, pgs.paragraphs)
-        except Exception as err:
-            issue = self._analyze_coverage_issue(segs, pgs.paragraphs)
-            self.logger.info(
-                "章节校验失败，准备补偿",
-                extra={
-                    "chapter_index": chapter_index,
-                    "chapter_path": chapter_path,
-                    "paragraphs": len(pgs.paragraphs),
-                    "error": str(err),
-                    **issue,
-                },
-            )
-            attempts = 0
-            repaired_success = False
-            current = pgs
-            last_error: Exception | None = None
-            while attempts < 3 and not repaired_success:
-                attempts += 1
-                repaired = self._repair_paragraphs(title, segs, current, err if attempts == 1 else last_error or err, issue)
-                current = repaired
-                self._normalize_paragraphs(current.paragraphs)
-                try:
-                    self._validate_time_coverage(segs, current.paragraphs)
-                    repaired_success = True
-                    validated_from = "repair" if attempts == 1 else f"repair_retry_{attempts}"
-                except Exception as retry_err:
-                    last_error = retry_err
-                    issue = self._analyze_coverage_issue(segs, current.paragraphs)
-                    if attempts >= 3:
-                        self.logger.error(
-                            "章节补偿连续失败",
-                            extra={
-                                "chapter_index": chapter_index,
-                                "chapter_path": chapter_path,
-                                "attempt": attempts,
-                                "error": str(retry_err),
-                                **issue,
-                            },
-                        )
-                        raise ValueError("章节补偿校验失败") from retry_err
-                    self.logger.info(
-                        "章节补偿再次失败，准备继续修复",
-                        extra={
-                            "chapter_index": chapter_index,
-                            "chapter_path": chapter_path,
-                            "attempt": attempts,
-                            "error": str(retry_err),
-                            **issue,
-                        },
-                    )
-            pgs = current
-
+        self._normalize_paragraphs(pgs.paragraphs)
+        self._validate_time_coverage(segs, pgs.paragraphs)
         self.logger.info(
             "章节校验通过",
             extra={
                 "chapter_index": chapter_index,
                 "chapter_path": chapter_path,
                 "paragraphs": len(pgs.paragraphs),
-                "source": validated_from,
             },
         )
 
         mode = getattr(getattr(self.cfg, "note", None), "mode", "subtitle")
         backfill = mode == "subtitle"
         line_lookup = {s.line_no: s for s in segs}
+
+        if mode == "optimized":
+            self._generate_ai_notes_for_paragraphs(title, pgs.paragraphs, line_lookup)
 
         paragraphs: List[Paragraph] = []
         tasks: List[ParagraphRenderTask] = []

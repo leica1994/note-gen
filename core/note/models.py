@@ -59,6 +59,17 @@ class ChaptersSchema(BaseModel):
     chapters: List[ChapterBoundary]
 
 
+# LLM 结构化输出契约（分段边界）
+class ParagraphBoundary(BaseModel):
+    title: str
+    start_line_no: int
+    end_line_no: int
+
+
+class ParagraphPlan(BaseModel):
+    paragraphs: List[ParagraphBoundary]
+
+
 # LLM 结构化输出契约（分段）
 class ParagraphLine(BaseModel):
     line_no: int
@@ -120,6 +131,13 @@ class ParagraphsSchema(BaseModel):
                 cleaned.append(item)
             return cleaned
         return []
+
+
+class ParagraphOptimizationSchema(BaseModel):
+    optimized: List[str] = Field(
+        default_factory=list,
+        description="AI 优化后的段落内容（以要点/短句形式输出，可含 Markdown 标记重点）",
+    )
 
 
 class SelectedIndexSchema(BaseModel):
