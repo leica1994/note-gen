@@ -378,16 +378,51 @@ class NoteGenerator:
             """
         ))
 
-        plan = self.text_llm.structured_invoke(ParagraphPlan, [sys, human], json_mode=False)
-        self._validate_paragraph_plan(segs, plan)
-        self.logger.info(
-            "分段计划生成完成",
-            extra={
-                "chapter_title": chapter_title,
-                "paragraphs": len(plan.paragraphs),
-            },
-        )
-        return plan
+        max_attempts = self._paragraph_retry.max_retries + 1
+        attempts = 0
+        last_err: Exception | None = None
+
+        while attempts < max_attempts:
+            attempts += 1
+            t_attempt = perf_counter()
+            plan: ParagraphPlan | None = None
+            try:
+                plan = self.text_llm.structured_invoke(ParagraphPlan, [sys, human], json_mode=False)
+                self._validate_paragraph_plan(segs, plan)
+                cost_ms = int((perf_counter() - t_attempt) * 1000)
+                self.logger.info(
+                    "分段计划生成完成",
+                    extra={
+                        "chapter_title": chapter_title,
+                        "paragraphs": len(plan.paragraphs),
+                        "attempt": attempts,
+                        "cost_ms": cost_ms,
+                    },
+                )
+                return plan
+            except Exception as err:
+                last_err = err
+                cost_ms = int((perf_counter() - t_attempt) * 1000)
+                log_extra = {
+                    "chapter_title": chapter_title,
+                    "segments": len(segs),
+                    "attempt": attempts,
+                    "max": max_attempts,
+                    "cost_ms": cost_ms,
+                    "error": str(err),
+                }
+                if plan is not None:
+                    log_extra["paragraphs"] = len(plan.paragraphs)
+
+                if attempts >= max_attempts:
+                    self.logger.error("分段计划校验失败", extra=log_extra)
+                    raise
+
+                self.logger.warning("分段计划生成失败，准备重试", extra=log_extra)
+                sleep(2)
+
+        assert last_err is not None
+        raise last_err
 
     def _validate_paragraph_plan(self, segs: List[SubtitleSegment], plan: ParagraphPlan) -> None:
         if not plan.paragraphs:
