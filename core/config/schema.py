@@ -79,9 +79,11 @@ class NoteConfig(BaseModel):
     - mode：
       - "subtitle"：字幕模式（当前默认，逐行展示字幕行）
       - "optimized"：AI 优化模式（段落内容经过优化合并并标注重点）
+    - write_headings：导出 Markdown 时是否写入章节/段落标题。
     """
 
     mode: Literal["subtitle", "optimized"] = Field(default="subtitle", description="笔记模式")
+    write_headings: bool = Field(default=True, description="导出 Markdown 时是否写入章节/段落标题")
     note_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
     screenshot_dir: Optional[Path] = Field(default=None, description="截图目录（高清重拍输出优先覆盖）")
     chapter_resegment_char_threshold: int = Field(

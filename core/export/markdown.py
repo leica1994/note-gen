@@ -9,11 +9,13 @@ from core.note.models import Chapter, Note, Paragraph
 class MarkdownExporter:
     """将 Note 导出为 Markdown 文件。"""
 
-    def __init__(self, outputs_root: Path, note_mode: str = "subtitle") -> None:
+    def __init__(self, outputs_root: Path, note_mode: str = "subtitle", *, write_headings: bool = True) -> None:
         self.outputs_root = Path(outputs_root)
         self.outputs_root.mkdir(parents=True, exist_ok=True)
         # 笔记模式：subtitle / optimized
         self.note_mode = note_mode
+        # 是否在 Markdown 中写入章节/段落标题
+        self.write_headings = bool(write_headings)
 
     def export(self, note: Note, filename: str | None = None) -> Path:
         title = note.video_path.stem
@@ -33,11 +35,12 @@ class MarkdownExporter:
         idx_label = ".".join(str(i) for i in index_path)
         lines: list[str] = []
 
-        if heading_level == 1:
-            lines.append(f"# 第{index_path[0]}章 {chapter.title}")
-        else:
-            hashes = "#" * level
-            lines.append(f"{hashes} {idx_label} {chapter.title}")
+        if self.write_headings:
+            if heading_level == 1:
+                lines.append(f"# 第{index_path[0]}章 {chapter.title}")
+            else:
+                hashes = "#" * level
+                lines.append(f"{hashes} {idx_label} {chapter.title}")
 
         if chapter.paragraphs:
             lines.extend(self._render_paragraphs(heading_level + 1, idx_label, chapter.paragraphs))
@@ -67,19 +70,14 @@ class MarkdownExporter:
         return out
 
     def _render_single_paragraph(self, heading_level: int, idx_prefix: str, p: Paragraph) -> list[str]:
-        """递归渲染单个段落及其子段。
-
-        参数：
-        - heading_level: 标题层级（2 表示顶层段落使用 ##）。
-        - idx_prefix: 编号前缀，例如 "1.2"、"1.2.3"。
-        - p: 段落对象。
-        """
+        """递归渲染单个段落及其子段。"""
         out: list[str] = []
 
         # 生成标题行：根据层级生成对应数量的 '#'
         level = max(1, min(6, heading_level))
-        hashes = "#" * level
-        out.append(f"{hashes} {idx_prefix} {p.title}")
+        if self.write_headings:
+            hashes = "#" * level
+            out.append(f"{hashes} {idx_prefix} {p.title}")
 
         # 图片（若有）：使用相对路径（相对于 outputs_root）
         if p.image and p.image.hi_res_image_path:
@@ -94,7 +92,8 @@ class MarkdownExporter:
                 except Exception:
                     # 跨盘符或其他异常：直接使用绝对路径，Markdown 解析器通常可识别本地绝对路径
                     img_rel = img_path
-            out.append("")
+            if out:
+                out.append("")
             out.append(f"![]({img_rel.as_posix()})")
             out.append("")
 

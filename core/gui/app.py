@@ -156,8 +156,12 @@ class Worker(QtCore.QThread):
 
             self.progress_changed.emit(85)
             # 3) 导出 Markdown
-            exporter = MarkdownExporter(md_root, note_mode=(
-                self.cfg.note.mode if getattr(self.cfg, 'note', None) else 'subtitle'))
+            note_cfg = getattr(self.cfg, "note", None)
+            exporter = MarkdownExporter(
+                md_root,
+                note_mode=(note_cfg.mode if note_cfg else 'subtitle'),
+                write_headings=getattr(note_cfg, "write_headings", True),
+            )
             md = exporter.export(note)
             logger.info("导出 Markdown 完成", extra={"path": str(md)})
             self.progress_changed.emit(100)
@@ -370,6 +374,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- 笔记参数配置 ---
         tab_note = QtWidgets.QWidget()
         note_layout = QtWidgets.QFormLayout(tab_note)
+        self.chk_note_write_headings = QtWidgets.QCheckBox("写入章节/段落标题")
+        try:
+            checked = bool(getattr(self.cfg.note, "write_headings", True))
+        except Exception:
+            checked = True
+        self.chk_note_write_headings.setChecked(checked)
+        note_layout.addRow("写入章节/段落标题", self.chk_note_write_headings)
         self.combo_note_mode = QtWidgets.QComboBox()
         self.combo_note_mode.addItem("字幕模式", userData="subtitle")
         self.combo_note_mode.addItem("AI优化模式", userData="optimized")
@@ -497,6 +508,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_mm_conc.valueChanged.connect(self._schedule_save_config)
         # 笔记模式变更
         self.combo_note_mode.currentIndexChanged.connect(self._schedule_save_config)
+        self.chk_note_write_headings.stateChanged.connect(self._schedule_save_config)
         # 新增：笔记/截图目录变更与选择
         self.edit_note_dir.textChanged.connect(self._schedule_save_config)
         self.edit_screenshot_dir.textChanged.connect(self._schedule_save_config)
@@ -935,6 +947,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 from core.config.schema import NoteConfig
                 self.cfg.note = NoteConfig()
             self.cfg.note.mode = mode
+            self.cfg.note.write_headings = bool(self.chk_note_write_headings.isChecked())
             txt_note_dir = (self.edit_note_dir.text() or '').strip()
             self.cfg.note.note_dir = Path(txt_note_dir) if txt_note_dir else None
             txt_shot_dir = (self.edit_screenshot_dir.text() or '').strip()
