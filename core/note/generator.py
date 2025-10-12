@@ -1097,7 +1097,10 @@ class NoteGenerator:
     @staticmethod
     def _sanitize_filename(name: str, *, allow_empty: bool = False) -> str:
         """过滤非法字符并统一空格为下划线，保持可追溯的命名。"""
-        sanitized = re.sub(r"[\\/\?%\\*:|\"<>]", "", name)
+        # 先将常见特殊符号（例如 #、*）统一替换为下划线，避免在不同平台触发解析问题
+        sanitized = re.sub(r"[#*]+", "_", name)
+        # 再移除文件系统不允许的符号
+        sanitized = re.sub(r"[\\/?%:|\"<>]", "", sanitized)
         sanitized = re.sub(r"[\s\u3000]+", "_", sanitized)
         sanitized = re.sub(r"_+", "_", sanitized)
         sanitized = sanitized.strip("._ ")
