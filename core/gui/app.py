@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -18,6 +20,8 @@ from core.utils.hash import hash_task
 from core.utils.logger import init_task_logger
 from core.utils.secrets import mask_secret
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TaskItem:
@@ -27,6 +31,7 @@ class TaskItem:
     progress: int = 0
     task_id: Optional[str] = None
     error: Optional[str] = None
+    output_dir: Optional[Path] = None
 
 
 class Worker(QtCore.QThread):
@@ -79,9 +84,21 @@ class Worker(QtCore.QThread):
             params = json.loads(self.cfg.model_dump_json())
             self.task.task_id = hash_task(self.task.video, self.task.subtitle, params)
 
-            # 输出目录：任务工作目录维持在项目根 outputs 下；Markdown 根目录遵循 GUI 配置。
-            out_dir = Path(self.cfg.export.outputs_root) / (self.task.task_id or "unknown")
-            out_dir.mkdir(parents=True, exist_ok=True)
+            # 生成过程工作目录：始终放在 outputs/<task_id> 下
+            work_dir = Path(self.cfg.export.outputs_root) / (self.task.task_id or "unknown")
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+            # 笔记最终输出目录：若单任务指定则优先，未指定则沿用 GUI 配置的笔记目录
+            note_cfg = getattr(self.cfg, "note", None)
+            cfg_note_dir = getattr(note_cfg, "note_dir", None) if note_cfg else None
+            custom_note_dir = getattr(self.task, "output_dir", None)
+            if custom_note_dir:
+                final_note_dir = Path(custom_note_dir)
+            elif cfg_note_dir:
+                final_note_dir = Path(cfg_note_dir)
+            else:
+                final_note_dir = work_dir
+            final_note_dir.mkdir(parents=True, exist_ok=True)
 
             # 初始化任务日志
             logger = init_task_logger(self.task.task_id or "unknown", self.cfg.export.logs_root)
@@ -91,14 +108,13 @@ class Worker(QtCore.QThread):
             })
             # 记录输出目录位置（便于审计）与配置（敏感打码）
             try:
-                md_root = Path(getattr(getattr(self.cfg, 'note', None), 'note_dir', None) or self.cfg.export.outputs_root)
                 logger.info("输出目录", extra={
-                    "markdown_root": str(md_root),
-                    "screenshots_task_dir": str(out_dir),
+                    "markdown_root": str(final_note_dir),
+                    "screenshots_task_dir": str(work_dir),
                     "hi_image_override_dir": str(getattr(getattr(self.cfg, 'note', None), 'screenshot_dir', '') or ''),
                 })
             except Exception:
-                md_root = Path(self.cfg.export.outputs_root)
+                pass
             logger.info("配置快照", extra={
                 "text_llm": {
                     "base_url": self.cfg.text_llm.base_url,
@@ -145,7 +161,7 @@ class Worker(QtCore.QThread):
             generator = NoteGenerator(self.cfg, logger=logger)
             meta = GenerationInputMeta(video_path=self.task.video, subtitle=sub_doc, params=params)
             t1 = perf_counter()
-            note = generator.generate(meta, out_dir)
+            note = generator.generate(meta, work_dir)
             logger.info("笔记生成完成", extra={
                 "chapters": len(note.chapters),
                 "cost_ms": int((perf_counter() - t1) * 1000),
@@ -158,7 +174,7 @@ class Worker(QtCore.QThread):
             # 3) 导出 Markdown
             note_cfg = getattr(self.cfg, "note", None)
             exporter = MarkdownExporter(
-                md_root,
+                final_note_dir,
                 note_mode=(note_cfg.mode if note_cfg else 'subtitle'),
                 write_headings=getattr(note_cfg, "write_headings", True),
             )
@@ -183,7 +199,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("note-gen：AI笔记")
-        self.resize(1200, 720)
+        self.resize(1360, 720)
         # 应用图标（窗口图标）
         try:
             self.setWindowIcon(self._icon("app"))
@@ -441,23 +457,32 @@ class MainWindow(QtWidgets.QMainWindow):
         # ============ 右侧：任务列表 ============
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
-        # 右侧任务表：将“错误”列改为“操作”列（内含删除按钮）
-        self.table = QtWidgets.QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["任务ID", "视频", "字幕", "状态", "进度%", "操作"])
-        # 调整列宽策略：操作列固定窄宽，其余列合理伸缩
+        # 右侧任务表：呈现任务序号、状态与输出目录
+        self.table = QtWidgets.QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["序号", "视频", "字幕", "状态", "进度%", "输出目录", "操作"])
+        # 调整列宽策略：序号与操作列固定，其余列根据内容或剩余空间伸缩
         try:
             header = self.table.horizontalHeader()
             header.setStretchLastSection(False)
-            # 操作列（第5列）固定宽度，避免被拉伸
-            header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Fixed)
-            self.table.setColumnWidth(5, 80)
-            # 视频与字幕列自适应填充
+            # 序号列（第0列）固定宽度便于快速浏览
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(0, 40)
+            # 状态、进度、操作列设置较窄宽度
+            header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(3, 60)
+            header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(4, 60)
+            header.setSectionResizeMode(6, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(6, 60)
+            # 视频、字幕与输出目录列填充剩余空间
             header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)
             # 表头文本居中
             header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         except Exception:
             pass
+        self.table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.verticalHeader().setVisible(False)
         # 更新按钮文案以匹配新行为：执行任务列表中所有“排队”任务
         self.btn_start = QtWidgets.QPushButton("开始处理任务列表")
@@ -518,6 +543,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 右侧任务表：双击打开输出目录（笔记目录优先）
         try:
             self.table.cellDoubleClicked.connect(self._on_table_double_click)
+            self.table.customContextMenuRequested.connect(self._on_table_context_menu)
         except Exception:
             pass
 
@@ -647,6 +673,7 @@ class MainWindow(QtWidgets.QMainWindow):
             def cell(txt: str):
                 item = QtWidgets.QTableWidgetItem(txt)
                 item.setFlags(item.flags() ^ QtCore.Qt.ItemIsEditable)
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 return item
 
             self.file_table.setItem(i, 1, cell(v.name))
@@ -771,13 +798,35 @@ class MainWindow(QtWidgets.QMainWindow):
             def cell(txt: str):
                 item = QtWidgets.QTableWidgetItem(txt)
                 item.setFlags(item.flags() ^ QtCore.Qt.ItemIsEditable)
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 return item
 
-            self.table.setItem(i, 0, cell(t.task_id or "-"))
+            self.table.setItem(i, 0, cell(str(i + 1)))
             self.table.setItem(i, 1, cell(t.video.name))
+            self.table.item(i, 1).setToolTip(str(t.video))
             self.table.setItem(i, 2, cell(t.subtitle.name))
+            self.table.item(i, 2).setToolTip(str(t.subtitle))
             self.table.setItem(i, 3, cell(t.status))
             self.table.setItem(i, 4, cell(str(t.progress)))
+
+            default_dir = self._default_output_dir()
+            display_dir = t.output_dir
+            resolved_dir = self._resolve_task_output_dir(t)
+            output_editor = QtWidgets.QLineEdit(str(display_dir) if display_dir else "")
+            output_editor.setClearButtonEnabled(False)
+            placeholder_base = default_dir or resolved_dir or Path(self.cfg.export.outputs_root)
+            placeholder = f"默认：{placeholder_base}"
+            output_editor.setPlaceholderText(placeholder)
+            if display_dir:
+                output_editor.setToolTip(str(display_dir))
+            elif resolved_dir:
+                output_editor.setToolTip(str(resolved_dir))
+            else:
+                output_editor.setToolTip("留空则使用笔记目录；未配置笔记目录时退回工作目录")
+            output_editor.editingFinished.connect(
+                lambda row=i, editor=output_editor: self._apply_output_dir(row, editor.text())
+            )
+            self.table.setCellWidget(i, 5, output_editor)
             # 操作列：删除按钮，点击后从任务列表移除该行
             action_container = QtWidgets.QWidget()
             action_layout = QtWidgets.QHBoxLayout(action_container)
@@ -793,7 +842,7 @@ class MainWindow(QtWidgets.QMainWindow):
             btn_del.clicked.connect(lambda _=False, row=i: self._delete_task_row(row))
             action_layout.addWidget(btn_del)
             action_layout.addStretch(1)
-            self.table.setCellWidget(i, 5, action_container)
+            self.table.setCellWidget(i, 6, action_container)
         # 按钮图标（样式增强，不影响逻辑）
         try:
             self.btn_start.setIcon(self._icon("play"))
@@ -842,6 +891,135 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pending_queue = []
         self._refresh_table()
 
+    def _default_output_dir(self) -> Optional[Path]:
+        """返回全局默认输出目录（优先笔记目录）。"""
+        note_cfg = getattr(self.cfg, "note", None)
+        candidate = getattr(note_cfg, "note_dir", None) if note_cfg else None
+        try:
+            return Path(candidate) if candidate else None
+        except Exception:
+            return None
+
+    def _apply_output_dir(self, row: int, text: str) -> None:
+        """同步表格中的输出目录设置到任务对象。"""
+        if row < 0 or row >= len(self.tasks):
+            return
+        cleaned = text.strip()
+        self.tasks[row].output_dir = Path(cleaned) if cleaned else None
+        widget = self.table.cellWidget(row, 5)
+        if isinstance(widget, QtWidgets.QLineEdit):
+            resolved_dir = self._resolve_task_output_dir(self.tasks[row])
+            placeholder_base = self._default_output_dir() or resolved_dir or Path(self.cfg.export.outputs_root)
+            widget.setPlaceholderText(f"默认：{placeholder_base}")
+            if self.tasks[row].output_dir:
+                widget.setToolTip(str(self.tasks[row].output_dir))
+            elif resolved_dir:
+                widget.setToolTip(str(resolved_dir))
+            else:
+                widget.setToolTip("留空则使用笔记目录；未配置笔记目录时退回工作目录")
+
+    def _sync_output_dir_from_row(self, row: int) -> None:
+        """在启动任务前读取编辑框内容，确保使用最新目录。"""
+        widget = self.table.cellWidget(row, 5)
+        if isinstance(widget, QtWidgets.QLineEdit):
+            self._apply_output_dir(row, widget.text())
+
+    def _on_table_context_menu(self, pos: QtCore.QPoint) -> None:
+        """在任务列表中显示右键菜单。"""
+        index = self.table.indexAt(pos)
+        row = index.row()
+        if row < 0 or row >= len(self.tasks):
+            return
+        menu = QtWidgets.QMenu(self.table)
+        act_open_output = menu.addAction("打开笔记输出目录")
+        act_open_source = menu.addAction("打开任务文件夹")
+        act_change_output = menu.addAction("更改笔记输出目录")
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action == act_open_output:
+            self._open_task_output_dir(row)
+        elif action == act_open_source:
+            self._open_task_source_dir(row)
+        elif action == act_change_output:
+            self._change_task_output_dir(row)
+
+    def _resolve_task_output_dir(self, task: TaskItem) -> Path:
+        """计算任务最终输出目录，遵循“单任务 > 笔记目录 > 全局输出”的优先级。"""
+        if task.output_dir:
+            return Path(task.output_dir)
+        default_dir = self._default_output_dir()
+        if default_dir:
+            return default_dir
+        try:
+            params = json.loads(self.cfg.model_dump_json())
+            task_id = task.task_id or hash_task(task.video, task.subtitle, params)
+            if not task.task_id:
+                task.task_id = task_id
+        except Exception:
+            task_id = task.task_id or "unknown"
+        return Path(self.cfg.export.outputs_root) / (task_id or "unknown")
+
+    def _open_task_output_dir(self, row: int) -> None:
+        """打开任务对应的笔记输出目录。"""
+        if row < 0 or row >= len(self.tasks):
+            return
+        path = self._resolve_task_output_dir(self.tasks[row])
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self._open_directory(path, "打开笔记输出目录失败")
+
+    def _open_task_source_dir(self, row: int) -> None:
+        """打开任务视频所在目录。"""
+        if row < 0 or row >= len(self.tasks):
+            return
+        task = self.tasks[row]
+        try:
+            path = Path(task.video).parent
+        except Exception:
+            path = Path(self.cfg.export.outputs_root)
+        self._open_directory(path, "打开任务文件夹失败")
+
+    def _change_task_output_dir(self, row: int) -> None:
+        """为指定任务重新选择笔记输出目录。"""
+        if row < 0 or row >= len(self.tasks):
+            return
+        task = self.tasks[row]
+        init_dir = task.output_dir or self._default_output_dir()
+        if not init_dir:
+            try:
+                init_dir = Path(task.video).parent
+            except Exception:
+                init_dir = Path.cwd()
+        try:
+            selected = QtWidgets.QFileDialog.getExistingDirectory(
+                self,
+                "选择笔记输出目录",
+                str(init_dir),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "选择目录失败", str(exc))
+            return
+        if not selected:
+            return
+        self.tasks[row].output_dir = Path(selected)
+        widget = self.table.cellWidget(row, 5)
+        if isinstance(widget, QtWidgets.QLineEdit):
+            prev = widget.blockSignals(True)
+            widget.setText(selected)
+            widget.blockSignals(prev)
+        self._apply_output_dir(row, selected)
+
+    def _open_directory(self, path: Path, error_title: str) -> None:
+        """在系统文件管理器中打开目录。"""
+        try:
+            path = Path(path)
+            if not path.exists():
+                path.mkdir(parents=True, exist_ok=True)
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, error_title, str(exc))
+
     def _start_row(self, row: int):
         """启动指定行的任务（串行执行的原子操作）。
 
@@ -852,6 +1030,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_worker and self.current_worker.isRunning():
             # 已有任务进行中，由队列驱动下一个，不在此重复启动
             return
+        self._sync_output_dir_from_row(row)
         task = self.tasks[row]
         # 启动前保存一次最新配置
         self._save_config()
@@ -1019,6 +1198,10 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             # 即便清理失败也不阻塞关闭
             pass
+        try:
+            self._cleanup_outputs_root()
+        except Exception:
+            pass
         return super().closeEvent(event)
 
     def _stop_all_tasks_on_close(self) -> None:
@@ -1077,6 +1260,31 @@ class MainWindow(QtWidgets.QMainWindow):
                         pass
         except Exception:
             pass
+
+    def _cleanup_outputs_root(self) -> None:
+        """退出时清空默认 outputs 根目录内容。"""
+        outputs_root = Path(self.cfg.export.outputs_root)
+        try:
+            if not outputs_root.exists():
+                return
+            for child in outputs_root.iterdir():
+                try:
+                    if child.is_file() or child.is_symlink():
+                        child.unlink(missing_ok=True)
+                    else:
+                        shutil.rmtree(child, ignore_errors=True)
+                except Exception as error:
+                    logger.warning(
+                        "清理 outputs 子项失败: %s",
+                        error,
+                        extra={"path": str(child)},
+                    )
+        except Exception as error:
+            logger.warning(
+                "清理 outputs 根目录失败: %s",
+                error,
+                extra={"path": str(outputs_root)},
+            )
 
     # 测试连通性（简单结构化返回）
     def _test_text_llm(self):
