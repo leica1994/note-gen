@@ -739,7 +739,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """扫描文件夹，查找同名“视频-字幕”对。
 
         - 当 recursive=True 时，递归遍历子目录：在每个视频所在目录按同名规则匹配字幕；
-        - 当 exclude_existing=True 时，若 Markdown 根目录已存在“视频名.md”，则跳过该视频；
+        - 当 exclude_existing=True 时，若 Markdown 根目录任一子目录中已存在“视频名.md”，则跳过该视频；
         - Markdown 根目录：优先使用配置的 `note.note_dir`，否则使用 `export.outputs_root`。
         """
         video_exts = {".mp4", ".mkv", ".mov", ".avi", ".wmv"}
@@ -751,14 +751,19 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             md_root = Path(self.cfg.export.outputs_root)
 
+        existing_notes: set[str] = set()
+        if exclude_existing:
+            # 递归收集所有已生成的笔记名称，避免重复生成
+            try:
+                if md_root.exists():
+                    existing_notes = {p.stem for p in md_root.rglob('*.md') if p.is_file()}
+            except Exception:
+                existing_notes = set()
+
         def should_exclude(video: Path) -> bool:
             if not exclude_existing:
                 return False
-            md_file = md_root / f"{video.stem}.md"
-            try:
-                return md_file.exists()
-            except Exception:
-                return False
+            return video.stem in existing_notes
 
         if recursive:
             # 递归模式：遍历目录下所有视频文件，并在其所在目录匹配字幕
