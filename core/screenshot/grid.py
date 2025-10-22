@@ -6,44 +6,36 @@ from core.config.schema import ScreenshotConfig
 
 
 def generate_grid_timestamps(start_sec: float, end_sec: float, cfg: ScreenshotConfig) -> List[float]:
-    """在区间内生成九宫格时间点（避开过渡帧）。
+    """在区间内生成九宫格时间点。
 
-    设计目标：
-    - 默认包含两端点（可配置），但实际取“收缩后的端点”，以避免淡入/淡出等过渡帧；
-    - 必须生成 `cfg.grid_count` 个严格递增且尽可能唯一的时间点；
-    - 当区间过短时，自动缩小边缘留白，保证可用。
+    设计目标（更新）：
+    - 固定使用区间起始、结束时间作为首尾两张截图；
+    - 其余 `grid_count - 2` 张按照时间区间均匀分割；
+    - 输出时间点严格递增，尽可能保持高精度，避免重复。
     """
     if end_sec <= start_sec:
         raise ValueError("时间区间非法")
 
     n = cfg.grid_count
-    # 根据区间长度自适应边缘留白，最多占用 1/4 区间
+    if n <= 0:
+        raise ValueError("九宫格数量配置非法")
+    if n == 1:
+        # 极端配置下仅返回起始帧
+        return [round(start_sec, 3)]
+
     span = float(end_sec) - float(start_sec)
-    adaptive_margin = min(max(0.0, cfg.edge_margin_sec), max(0.0, span / 4))
-    s = start_sec + adaptive_margin
-    e = end_sec - adaptive_margin
+    step = span / float(n - 1)
+    raw_points = [start_sec + step * i for i in range(n)]
+    raw_points[0] = start_sec
+    raw_points[-1] = end_sec
 
-    # 若缩减后出现反转（极短区间），退化为不加留白
-    if e <= s:
-        s, e = start_sec, end_sec
-
-    if cfg.include_endpoints:
-        step = (e - s) / (n - 1)
-        arr = [round(s + i * step, 3) for i in range(n)]
-    else:
-        step = (e - s) / (n + 1)
-        arr = [round(s + (i + 1) * step, 3) for i in range(n)]
-
-    # 唯一性与单调性粗检（避免由于过短区间产生重复）
-    if len(set(arr)) < n:
-        # 再次兜底：均匀采样在 (start, end) 内，偏向中部
-        if span <= 0:
-            raise ValueError("时间区间非法")
-        # 采用不含端点的方式重算
-        step = span / (n + 1)
-        arr = [round(start_sec + (i + 1) * step, 3) for i in range(n)]
+    rounded = [round(pt, 3) for pt in raw_points]
+    if len(set(rounded)) < n:
+        rounded = [round(pt, 6) for pt in raw_points]
+    if len(set(rounded)) < n:
+        rounded = raw_points
 
     for i in range(1, n):
-        if not (arr[i] > arr[i - 1]):
+        if rounded[i] <= rounded[i - 1]:
             raise ValueError("时间点非严格递增")
-    return arr
+    return rounded
