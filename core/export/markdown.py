@@ -9,13 +9,22 @@ from core.note.models import Chapter, Note, Paragraph
 class MarkdownExporter:
     """将 Note 导出为 Markdown 文件。"""
 
-    def __init__(self, outputs_root: Path, note_mode: str = "subtitle", *, write_headings: bool = True) -> None:
+    def __init__(
+        self,
+        outputs_root: Path,
+        note_mode: str = "subtitle",
+        *,
+        write_headings: bool = True,
+        show_time_range: bool = False,
+    ) -> None:
         self.outputs_root = Path(outputs_root)
         self.outputs_root.mkdir(parents=True, exist_ok=True)
         # 笔记模式：subtitle / optimized
         self.note_mode = note_mode
         # 是否在 Markdown 中写入章节/段落标题
         self.write_headings = bool(write_headings)
+        # 是否在段落首行展示时间戳范围
+        self.show_time_range = bool(show_time_range)
 
     def export(self, note: Note, filename: str | None = None) -> Path:
         title = note.video_path.stem
@@ -79,6 +88,14 @@ class MarkdownExporter:
             hashes = "#" * level
             out.append(f"{hashes} {idx_prefix} {p.title}")
 
+        if self.show_time_range:
+            if out and out[-1] != "":
+                out.append("")
+            start_text = self._format_timestamp(p.start_sec)
+            end_text = self._format_timestamp(p.end_sec)
+            out.append(f"时间范围：{start_text} - {end_text}")
+            out.append("")
+
         # 图片（若有）：使用相对路径（相对于 outputs_root）
         if p.image and p.image.hi_res_image_path:
             img_path = p.image.hi_res_image_path
@@ -116,3 +133,11 @@ class MarkdownExporter:
                 out.extend(self._render_single_paragraph(heading_level=level + 1, idx_prefix=child_prefix, p=c))
 
         return out
+
+    @staticmethod
+    def _format_timestamp(seconds: float) -> str:
+        total_ms = max(0, int(round(seconds * 1000)))
+        hours, remainder = divmod(total_ms, 3_600_000)
+        minutes, remainder = divmod(remainder, 60_000)
+        secs, millis = divmod(remainder, 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"

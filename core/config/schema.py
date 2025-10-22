@@ -84,6 +84,10 @@ class NoteConfig(BaseModel):
 
     mode: Literal["subtitle", "optimized"] = Field(default="subtitle", description="笔记模式")
     write_headings: bool = Field(default=True, description="导出 Markdown 时是否写入章节/段落标题")
+    show_paragraph_time_range: bool = Field(
+        default=False,
+        description="导出 Markdown 时在段落首行写入时间戳范围",
+    )
     note_dir: Optional[Path] = Field(default=None, description="笔记目录（Markdown 输出根目录优先覆盖）")
     screenshot_dir: Optional[Path] = Field(default=None, description="截图目录（高清重拍输出优先覆盖）")
     chapter_resegment_char_threshold: int = Field(
