@@ -29,6 +29,8 @@ from core.note.models import (
     ParagraphPlan,
     ParagraphSchema,
     ParagraphsSchema,
+    SelectionDebug,
+    TileEvaluation,
 )
 from core.screenshot.ffmpeg import Screenshotter
 from core.screenshot.grid import generate_grid_timestamps
@@ -553,28 +555,45 @@ class NoteGenerator:
         text = "\n".join(f"{s.line_no}: {s.text}" for s in para.lines)
         instruction = dedent(
             f"""
-            任务：对九宫格（3x3，共9张）截图进行评分并选出最能表达本段内容的一张。
+            角色：请以“行情图像取证官”的身份工作，从九宫格截图（按左到右、上到下编号 1..9）中挑出最能支撑段落观点的一张。
 
             步骤：
-            1. 先从段落内容中提炼 3-6 个关键词或短语（含颜色、形状、方向、核心物体/界面元素），这些词用于比对截图，尤其关注诸如“蓝色箭头”“折线图”“控制台”等描述。
-            2. 依次审视 9 张截图，并在心中按以下标准打分（满分 10 分）：
-               - 语义匹配（0-5）：画面是否呈现关键词描述的核心对象或动作；完全吻合得 4-5 分，部分吻合得 2-3 分，缺失关键信息 ≤1 分。
-               - 视觉指示（0-2）：是否出现段落强调的颜色/箭头/标注/提示框等显著元素；清晰呈现加 2 分，模糊或被遮挡降至 0 分。
-               - 清晰稳定（0-2）：主体清晰、无重影/模糊/过曝/裁切/遮挡；若存在瑕疵扣 1-2 分。
-               - 信息密度（0-1）：画面是否提供与段落内容相关的结构或上下文支持。
-            3. 按扣分规则执行惩罚：
-               - 若出现交叉淡入、叠化重影、强运动模糊、被字幕或弹窗遮住关键信息，额外扣除 ≥3 分。
-               - 若关键词强调的元素完全缺失（如段落提到“蓝色箭头”却未出现），语义匹配不得超过 1 分。
-            4. 选择总分最高的截图；若有并列，优先选取更加清晰、元素完整的一张。
+            1. 对每张图提取关键信息：文字内容（如 Trading Range bar、Trend bar）、颜色标记/箭头/框选等视觉符号（只要出现段落强调的颜色标记，例如蓝色箭头，就算命中，不要判断箭头指向是否“正确”），以及结构特征（实体大小、影线长短、走势对比、示例数量等）。
+            2. 与段落内容匹配并计分：
+               • 每命中一个段落中的关键词、术语或结构描述，加 2 分（同一要素多次提到可累计）。
+               • 只要画面出现段落强调的颜色标记（如“蓝色箭头”），直接额外加 3 分，不要因为箭头位置或目标作出扣分判断。
+               • 若画面清晰展示段落描述的结构特征（例如实体小于一半、影线很长、震荡示例等），每项再加 2 分。
+            3. 额外加分：主题契合（0~2 分，是否展示段落强调的震荡K线案例）；信息支撑（0~1 分，是否提供上下文或对比说明）。
+            4. 仅当出现明显画质问题（模糊、遮挡、过曝、严重裁剪）时才扣分，每项扣 2 分；没有这些问题就不要扣分。
+            5. 汇总得分后选出得分最高的编号。若出现并列，优先选择包含颜色标记（如蓝色箭头）且最符合段落要点的一张；仍并列时选择画面最清晰的一张。
 
-            输出规范：仅返回一个阿拉伯数字（1-9），不含空格或其他字符；无法判断时返回 5。
+            输出 JSON：
+            {{
+              "best_index": <最终编号>,
+              "evaluations": [
+                {{"index": 1, "score": <分数>, "reason": "<简要原因>"}},
+                ...
+                {{"index": 9, "score": <分数>, "reason": "<简要原因>"}}
+              ]
+            }}
 
             段落内容：
             {text}
             """
         )
-        chosen = self.mm_llm.choose_index(instruction, str(grid_path))
-        return int(chosen)
+        result = self.mm_llm.structured_choose(SelectionDebug, instruction, str(grid_path))
+        chosen = int(result.best_index)
+        self.logger.info(
+            "多模态选图结果",
+            extra={
+                "chapter_index": ci,
+                "para_index": pi,
+                "grid": str(grid_path),
+                "chosen": chosen,
+                "evaluations": [e.model_dump() for e in result.evaluations],
+            },
+        )
+        return chosen
 
     def _convert_paragraph(
         self,

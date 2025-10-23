@@ -140,5 +140,16 @@ class ParagraphOptimizationSchema(BaseModel):
     )
 
 
+class TileEvaluation(BaseModel):
+    index: int = Field(ge=1, le=9)
+    score: float
+    reason: str = Field(default="")
+
+
+class SelectionDebug(BaseModel):
+    best_index: int = Field(ge=1, le=9)
+    evaluations: List[TileEvaluation]
+
+
 class SelectedIndexSchema(BaseModel):
     index: int = Field(ge=1, le=9)

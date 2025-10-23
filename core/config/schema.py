@@ -37,8 +37,8 @@ class ScreenshotConfig(BaseModel):
 
     ffmpeg_path: str = Field(default="ffmpeg", description="ffmpeg 可执行文件路径")
     ffprobe_path: str = Field(default="ffprobe", description="ffprobe 可执行文件路径")
-    low_width: int = Field(default=320, description="九宫格单格低清宽度")
-    low_height: int = Field(default=180, description="九宫格单格低清高度")
+    low_width: int = Field(default=480, description="九宫格单格低清宽度")
+    low_height: int = Field(default=270, description="九宫格单格低清高度")
     grid_columns: int = Field(default=3, description="九宫格列数")
     grid_rows: int = Field(default=3, description="九宫格行数")
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
