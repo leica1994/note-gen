@@ -69,13 +69,21 @@ class Screenshotter:
         wrapped = self._retry(_invoke)
         return wrapped()
 
-    def _run_ffmpeg_dual_seek(self, video: Path, out_path: Path, ts_sec: float,
-                              pre_window: float = 5.0, quality: int | None = None) -> None:
-        """双阶段寻址：先粗跳、再精确。
+    def _run_ffmpeg_dual_seek(
+        self,
+        video: Path,
+        out_path: Path,
+        ts_sec: float,
+        pre_window: float = 5.0,
+        width: int | None = None,
+        height: int | None = None,
+        quality: int | None = None,
+    ) -> None:
+        """双阶段寻址：先粗跳、再精确，可选缩放确保尺寸一致。
 
         - 先执行 `-ss pre_seek -i input` 进行快速粗跳；
         - 再执行 `-ss post_seek` 精确到目标时间；
-        - 仅用于高清重拍，保证接近逐帧精度且整体性能远优于纯精确寻址。
+        - 若提供 `width/height`，附加 scale 滤镜以生成固定尺寸缩略图。
         """
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pre_seek = max(0.0, float(ts_sec) - float(pre_window))
@@ -90,6 +98,8 @@ class Screenshotter:
             "-ss", f"{post_seek:.3f}",
             "-frames:v", "1",
         ]
+        if width and height:
+            cmd += ["-vf", f"scale={width}:{height}"]
         if quality is not None:
             cmd += ["-q:v", str(quality)]
         cmd += ["-y", str(out_path)]
@@ -113,9 +123,15 @@ class Screenshotter:
         paths: List[Path] = []
         for idx, t in enumerate(timestamps, start=1):
             out = out_dir / f"thumb_{idx}.jpg"
-            # 使用快速寻址以提升批量截帧性能（九宫格用）
-            self._run_ffmpeg_fast_seek(
-                video, out, t, width=self.cfg.low_width, height=self.cfg.low_height, quality=10
+            # 精确寻址后再缩放，确保九宫格缩略图与时间戳一一对应
+            self._run_ffmpeg_dual_seek(
+                video,
+                out,
+                t,
+                pre_window=5.0,
+                width=self.cfg.low_width,
+                height=self.cfg.low_height,
+                quality=10,
             )
             paths.append(out)
         return paths
