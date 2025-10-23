@@ -220,7 +220,7 @@ class Screenshotter:
                 pre_window=5.0,
                 width=self.cfg.low_width,
                 height=self.cfg.low_height,
-                quality=5,
+                quality=3,
             )
             paths.append(out)
         return paths
