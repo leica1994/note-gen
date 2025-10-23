@@ -916,8 +916,20 @@ class NoteGenerator:
             para = task.paragraph
             base_dir = task.base_dir
             base_dir.mkdir(parents=True, exist_ok=True)
-            timestamps = generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
+
+            raw_timestamps = list(
+                generate_grid_timestamps(para.start_sec, para.end_sec, self.cfg.screenshot)
+            )
+            tol = 0.05
+            align_result = self.screenshotter.align_timestamps_to_frames(video_path, raw_timestamps)
+            if align_result:
+                aligned_ts, tol_hint = align_result
+                if len(aligned_ts) == len(raw_timestamps):
+                    raw_timestamps = aligned_ts
+                    tol = max(0.003, min(0.05, tol_hint))
+            timestamps = list(raw_timestamps)
             task.timestamps = list(timestamps)
+
             grid_path = base_dir / "grid.jpg"
             thumbs_dir = base_dir / "thumbs"
             t_s = perf_counter()
@@ -931,6 +943,7 @@ class NoteGenerator:
                         rows=self.cfg.screenshot.grid_rows,
                         width=self.cfg.screenshot.low_width,
                         height=self.cfg.screenshot.low_height,
+                        tol=tol,
                     )
             except Exception as e:
                 thumbs_dir.mkdir(parents=True, exist_ok=True)

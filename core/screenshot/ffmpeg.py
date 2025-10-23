@@ -10,6 +10,9 @@ from core.config.schema import ScreenshotConfig
 from core.utils.retry import RetryPolicy
 
 
+import bisect
+import json
+
 class Screenshotter:
     """基于 ffmpeg 的截图工具。
 
@@ -112,6 +115,92 @@ class Screenshotter:
 
         wrapped = self._retry(_invoke)
         return wrapped()
+
+    def align_timestamps_to_frames(
+        self,
+        video: Path,
+        timestamps: Iterable[float],
+        margin: float = 0.2,
+    ) -> tuple[List[float], float] | None:
+        """使用 ffprobe 将理想时间戳吸附到真实帧时间。
+
+        - 读取 [min(ts)-margin, max(ts)+margin] 区间内的帧时间戳；
+        - 逐个时间点选择距离最近且不回退的实际帧；
+        - 返回调整后的时间列表与建议容差（约等于最小帧间隔的 1/3）。
+        """
+        ts_list = [float(t) for t in timestamps]
+        if not ts_list:
+            return None
+
+        t_start = max(0.0, min(ts_list) - float(margin))
+        t_stop = max(ts_list) + float(margin)
+        read_span = max(0.5, t_stop - t_start)
+        cmd = [
+            self.cfg.ffprobe_path,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-select_streams", "v:0",
+            "-read_intervals", f"{t_start:.3f}%+{read_span:.3f}",
+            "-show_entries", "frame=best_effort_timestamp_time,pkt_pts_time,pts_time",
+            "-of", "json",
+            str(video),
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            return None
+        if res.returncode != 0:
+            return None
+        try:
+            data = json.loads(res.stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+
+        frames = data.get("frames") or []
+        pts_seq: List[float] = []
+        for frame in frames:
+            val = (
+                frame.get("best_effort_timestamp_time")
+                or frame.get("pkt_pts_time")
+                or frame.get("pts_time")
+            )
+            if val is None:
+                continue
+            try:
+                pts_seq.append(float(val))
+            except (TypeError, ValueError):
+                continue
+        if not pts_seq:
+            return None
+
+        pts_seq = sorted(set(pts_seq))
+        gaps = [pts_seq[i + 1] - pts_seq[i] for i in range(len(pts_seq) - 1) if pts_seq[i + 1] > pts_seq[i]]
+        min_gap = min(gaps) if gaps else 0.0
+
+        aligned: List[float] = []
+        last_idx = 0
+        max_idx = len(pts_seq) - 1
+        for target in ts_list:
+            idx = bisect.bisect_left(pts_seq, target, lo=last_idx)
+            candidates: List[int] = []
+            if idx <= max_idx:
+                candidates.append(idx)
+            if idx - 1 >= last_idx:
+                candidates.append(idx - 1)
+            if not candidates and last_idx <= max_idx:
+                candidates.append(last_idx)
+            if not candidates:
+                candidates.append(max_idx)
+            chosen = min(candidates, key=lambda i: abs(pts_seq[i] - target))
+            if chosen < last_idx:
+                chosen = last_idx
+            last_idx = chosen
+            aligned.append(pts_seq[chosen])
+            if last_idx < max_idx and pts_seq[last_idx] < target and pts_seq[last_idx + 1] - pts_seq[last_idx] < max(0.5, min_gap * 1.5):
+                last_idx = min(last_idx + 1, max_idx)
+
+        tol_hint = min_gap / 3 if min_gap > 0 else 0.02
+        return aligned, tol_hint
 
     def _classify_ffmpeg(self, e: Exception) -> str | None:
         # 将所有异常按 5xx 类对待，触发 2s 间隔重试

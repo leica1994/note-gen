@@ -36,6 +36,7 @@ class ScreenshotConfig(BaseModel):
     """截图与九宫格配置。"""
 
     ffmpeg_path: str = Field(default="ffmpeg", description="ffmpeg 可执行文件路径")
+    ffprobe_path: str = Field(default="ffprobe", description="ffprobe 可执行文件路径")
     low_width: int = Field(default=320, description="九宫格单格低清宽度")
     low_height: int = Field(default=180, description="九宫格单格低清高度")
     grid_columns: int = Field(default=3, description="九宫格列数")
