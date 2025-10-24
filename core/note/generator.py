@@ -562,9 +562,9 @@ class NoteGenerator:
                • 结构特征（实体/影线比例、走势变化、是否多案例对比、上下文关系等）。
             2. 逐张分析九宫格，先完成“内容分组”：
                • 根据主体、布局、文字标注、背景或场景判断是否为同一画面；几乎相同或仅存在轻微时间过渡的帧视为同组。
-               • 明显的过渡帧、镜头切换、模糊帧或遮挡帧应单独成组，并标记为低优先级。
+               • 含有明显的过渡帧、淡入淡出、残影/双画面、镜头切换、模糊拖影或遮挡的帧必须单独成组且标记为低优先级；一旦存在更稳定帧，禁止选用这些过渡帧。
             3. 对每个分组挑选一张“代表帧”：
-               • 优先选取无过渡、无模糊、细节清晰、标注完整的一张。
+               • 优先选择无过渡、无残影、无模糊、无文字错位且细节清晰的一张；若同组同时存在过渡帧与稳定帧，必须直接剔除所有过渡帧（如淡入淡出、重影、帧间叠加）。在剩余候选中选择最清晰、标注完整且通常位于时间序列稍后的稳定帧。
                • 若该组全部质量有限，选择信息最完整的一张，并记录其限制。
             4. 仅保留每组代表帧，其余帧不参与后续比较。
             5. 针对代表帧，与段落要点逐项比对并在心中计分：
@@ -1099,8 +1099,8 @@ class NoteGenerator:
                 self._format_ts_hhmmss(task.chosen_timestamp),
             ]
             hi_base = "_".join(part for part in name_parts if part)
-            # 分段净化名称，确保空格与特殊字符统一处理
-            hi_name = self._sanitize_filename(hi_base) + ".jpg"
+            # 使用 PNG 保持无损画质，避免重压缩造成信息丢失
+            hi_name = self._sanitize_filename(hi_base) + ".png"
             out_root = Path(hi_root) if hi_root else task.base_dir
             try:
                 out_root.mkdir(parents=True, exist_ok=True)

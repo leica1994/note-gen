@@ -94,16 +94,25 @@ class Screenshotter:
         cmd = [
             self.cfg.ffmpeg_path,
             "-hide_banner",
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
             *self._hwaccel_args(),
-            "-ss", f"{pre_seek:.3f}",
-            "-i", str(video),
-            "-ss", f"{post_seek:.3f}",
-            "-frames:v", "1",
+            "-ss",
+            f"{pre_seek:.3f}",
+            "-i",
+            str(video),
+            "-ss",
+            f"{post_seek:.3f}",
+            "-frames:v",
+            "1",
         ]
+        suffix = out_path.suffix.lower()
         if width and height:
             cmd += ["-vf", f"scale={width}:{height}"]
-        if quality is not None:
+        if suffix == ".png":
+            # PNG 保持无损质量，强制使用无损编码并避免质量参数干扰
+            cmd += ["-f", "image2", "-vcodec", "png", "-compression_level", "0"]
+        elif quality is not None:
             cmd += ["-q:v", str(quality)]
         cmd += ["-y", str(out_path)]
 
