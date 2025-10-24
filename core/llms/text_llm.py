@@ -27,12 +27,16 @@ class TextLLM:
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             timeout=cfg.request_timeout,
+            streaming=cfg.streaming,
         )
 
     def structured_invoke(self, schema: Type[T], prompt_messages: list, json_mode: bool = False) -> T:
         """以结构化输出方式执行调用。"""
         log = logging.getLogger("note_gen.llms.text")
-        log.info("调用文本 LLM（结构化输出）", extra={"json_mode": json_mode, "schema": schema.__name__})
+        log.info(
+            "调用文本 LLM（结构化输出）",
+            extra={"json_mode": json_mode, "schema": schema.__name__, "streaming": self.cfg.streaming},
+        )
 
         def inner_call() -> T:
             if json_mode:
@@ -50,7 +54,7 @@ class TextLLM:
     def invoke(self, prompt_messages: list) -> str:
         """以普通文本形式执行调用，返回模型原始内容。"""
         log = logging.getLogger("note_gen.llms.text")
-        log.info("调用文本 LLM（普通输出）")
+        log.info("调用文本 LLM（普通输出）", extra={"streaming": self.cfg.streaming})
 
         def inner_call() -> str:
             message = self._model.invoke(prompt_messages)

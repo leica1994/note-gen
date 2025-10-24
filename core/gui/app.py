@@ -123,6 +123,7 @@ class Worker(QtCore.QThread):
                     "temperature": self.cfg.text_llm.temperature,
                     "max_tokens": self.cfg.text_llm.max_tokens,
                     "request_timeout": self.cfg.text_llm.request_timeout,
+                    "streaming": self.cfg.text_llm.streaming,
                     "concurrency": self.cfg.text_llm.concurrency,
                 },
                 "mm_llm": {
@@ -132,6 +133,7 @@ class Worker(QtCore.QThread):
                     "temperature": self.cfg.mm_llm.temperature,
                     "max_tokens": self.cfg.mm_llm.max_tokens,
                     "request_timeout": self.cfg.mm_llm.request_timeout,
+                    "streaming": self.cfg.mm_llm.streaming,
                     "concurrency": self.cfg.mm_llm.concurrency,
                 },
                 "screenshot": self.cfg.screenshot.model_dump(mode="json"),
@@ -339,6 +341,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
         self.spin_text_conc.setRange(1, 2147483647)
         self.spin_text_conc.setValue(self.cfg.text_llm.concurrency)
+        self.chk_text_streaming = QtWidgets.QCheckBox("启用流式输出")
+        try:
+            self.chk_text_streaming.setChecked(bool(getattr(self.cfg.text_llm, "streaming", False)))
+        except Exception:
+            self.chk_text_streaming.setChecked(False)
         self.btn_test_llm = QtWidgets.QPushButton("测试文本LLM连通性")
 
         text_layout.addRow("文本LLM base_url", self.edit_base_url)
@@ -347,6 +354,7 @@ class MainWindow(QtWidgets.QMainWindow):
         text_layout.addRow("文本LLM max_tokens", self.spin_text_max_tokens)
         text_layout.addRow("文本LLM请求超时(秒)", self.spin_text_timeout)
         text_layout.addRow("文本LLM并发", self.spin_text_conc)
+        text_layout.addRow("文本LLM流式输出", self.chk_text_streaming)
         text_layout.addRow(self.btn_test_llm)
         bottom_tabs.addTab(tab_text_llm, "文本LLM")
 
@@ -376,6 +384,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # 放开上限：仅设置最小值为 1，最大值使用 32 位整型上限
         self.spin_mm_conc.setRange(1, 2147483647)
         self.spin_mm_conc.setValue(self.cfg.mm_llm.concurrency)
+        self.chk_mm_streaming = QtWidgets.QCheckBox("启用流式输出")
+        try:
+            self.chk_mm_streaming.setChecked(bool(getattr(self.cfg.mm_llm, "streaming", False)))
+        except Exception:
+            self.chk_mm_streaming.setChecked(False)
         self.btn_test_mm = QtWidgets.QPushButton("测试多模态LLM连通性")
 
         mm_layout.addRow("多模态 base_url", self.edit_mm_base_url)
@@ -384,6 +397,7 @@ class MainWindow(QtWidgets.QMainWindow):
         mm_layout.addRow("多模态 max_tokens", self.spin_mm_max_tokens)
         mm_layout.addRow("多模态请求超时(秒)", self.spin_mm_timeout)
         mm_layout.addRow("多模态并发", self.spin_mm_conc)
+        mm_layout.addRow("多模态流式输出", self.chk_mm_streaming)
         mm_layout.addRow(self.btn_test_mm)
 
         bottom_tabs.addTab(tab_mm_llm, "多模态LLM")
@@ -1122,6 +1136,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.cfg.text_llm.request_timeout = int(self.spin_text_timeout.value())
             except Exception:
                 pass
+            self.cfg.text_llm.streaming = bool(self.chk_text_streaming.isChecked())
             self.cfg.text_llm.concurrency = int(self.spin_text_conc.value())
             self.cfg.mm_llm.base_url = self.edit_mm_base_url.text() or None
             self.cfg.mm_llm.api_key = self.edit_mm_api_key.text() or None
@@ -1132,18 +1147,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.cfg.mm_llm.request_timeout = int(self.spin_mm_timeout.value())
             except Exception:
                 pass
+            self.cfg.mm_llm.streaming = bool(self.chk_mm_streaming.isChecked())
             self.cfg.mm_llm.concurrency = int(self.spin_mm_conc.value())
             data = self.combo_note_mode.currentData()
-            mode = data if isinstance(data, str) else 'subtitle'
-            if not getattr(self.cfg, 'note', None):
+            mode = data if isinstance(data, str) else "subtitle"
+            if not getattr(self.cfg, "note", None):
                 from core.config.schema import NoteConfig
                 self.cfg.note = NoteConfig()
             self.cfg.note.mode = mode
             self.cfg.note.write_headings = bool(self.chk_note_write_headings.isChecked())
             self.cfg.note.show_paragraph_time_range = bool(self.chk_note_show_time_range.isChecked())
-            txt_note_dir = (self.edit_note_dir.text() or '').strip()
+            txt_note_dir = (self.edit_note_dir.text() or "").strip()
             self.cfg.note.note_dir = Path(txt_note_dir) if txt_note_dir else None
-            txt_shot_dir = (self.edit_screenshot_dir.text() or '').strip()
+            txt_shot_dir = (self.edit_screenshot_dir.text() or "").strip()
             self.cfg.note.screenshot_dir = Path(txt_shot_dir) if txt_shot_dir else None
             try:
                 self.cfg.note.chapter_resegment_char_threshold = int(self.spin_note_resegment.value())
@@ -1319,6 +1335,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 model=self.edit_model.text(),
                 temperature=0,
                 timeout=30,
+                streaming=self.chk_text_streaming.isChecked(),
             ).with_structured_output(Ping)
             result = model.invoke([HumanMessage(content="返回 {\"ok\": true}")])
             cost_ms = int((perf_counter() - t0) * 1000)
@@ -1366,6 +1383,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 model=self.edit_mm_model.text(),
                 temperature=0,
                 timeout=30,
+                streaming=self.chk_mm_streaming.isChecked(),
             )
             prompt = "请只返回一个数字（1-9），不要任何其他字符、空格或换行。若无法判断返回 5。"
             result = model.invoke([HumanMessage(content=prompt)])

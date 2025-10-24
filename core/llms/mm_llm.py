@@ -31,6 +31,7 @@ class MultiModalLLM:
             temperature=cfg.temperature,
             max_tokens=cfg.max_tokens,
             timeout=cfg.request_timeout,
+            streaming=cfg.streaming,
         )
 
     def _image_block(self, image_path: str) -> dict:
@@ -60,7 +61,7 @@ class MultiModalLLM:
         msg = HumanMessage(content=blocks)
         log.info(
             "调用多模态 LLM（结构化输出）",
-            extra={"schema": schema.__name__, "image": image_path},
+            extra={"schema": schema.__name__, "image": image_path, "streaming": self.cfg.streaming},
         )
 
         def inner_call() -> T:
@@ -81,7 +82,7 @@ class MultiModalLLM:
             self._image_block(image_path),
         ]
         msg = HumanMessage(content=blocks)
-        log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path})
+        log.info("调用多模态 LLM（纯文本输出）", extra={"image": image_path, "streaming": self.cfg.streaming})
 
         def inner_call() -> int:
             resp = self._model.invoke([msg])

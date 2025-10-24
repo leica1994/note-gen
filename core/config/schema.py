@@ -22,6 +22,7 @@ class LLMConfig(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="采样温度")
     max_tokens: Optional[int] = Field(default=None, description="最大生成 token 数")
     request_timeout: int = Field(default=300, description="请求超时（秒）")
+    streaming: bool = Field(default=False, description="是否启用流式输出")
     # 放开并发上限约束：仅要求 >=1；具体风险由使用方自行控制
     concurrency: int = Field(default=10, ge=1, description="并发数（默认10，按需限流）")
 
