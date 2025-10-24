@@ -72,6 +72,21 @@ class Screenshotter:
         wrapped = self._retry(_invoke)
         return wrapped()
 
+    def _grid_tile_shape(
+        self,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
+        """计算九宫格单格尺寸，确保不低于配置的最小分辨率。"""
+
+        base_w = width if width is not None else self.cfg.low_width
+        base_h = height if height is not None else self.cfg.low_height
+        min_w = getattr(self.cfg, "grid_min_width", base_w)
+        min_h = getattr(self.cfg, "grid_min_height", base_h)
+        tile_w = max(int(base_w), int(min_w))
+        tile_h = max(int(base_h), int(min_h))
+        return tile_w, tile_h
+
     def _run_ffmpeg_dual_seek(
         self,
         video: Path,
@@ -219,6 +234,7 @@ class Screenshotter:
 
     def capture_thumbs(self, video: Path, timestamps: Iterable[float], out_dir: Path) -> List[Path]:
         paths: List[Path] = []
+        tile_w, tile_h = self._grid_tile_shape()
         for idx, t in enumerate(timestamps, start=1):
             out = out_dir / f"thumb_{idx}.jpg"
             # 精确寻址后再缩放，确保九宫格缩略图与时间戳一一对应
@@ -227,8 +243,8 @@ class Screenshotter:
                 out,
                 t,
                 pre_window=5.0,
-                width=self.cfg.low_width,
-                height=self.cfg.low_height,
+                width=tile_w,
+                height=tile_h,
                 quality=3,
             )
             paths.append(out)
@@ -238,13 +254,15 @@ class Screenshotter:
         cols, rows = self.cfg.grid_columns, self.cfg.grid_rows
         if len(thumbs) != cols * rows:
             raise ValueError("九宫格缩略图数量不匹配")
-        w, h = self.cfg.low_width, self.cfg.low_height
-        grid = Image.new("RGB", (w * cols, h * rows))
+        tile_w, tile_h = self._grid_tile_shape()
+        grid = Image.new("RGB", (tile_w * cols, tile_h * rows))
         for i, p in enumerate(thumbs):
             img = Image.open(p).convert("RGB")
+            if img.size != (tile_w, tile_h):
+                img = img.resize((tile_w, tile_h), Image.LANCZOS)
             col = i % cols
             row = i // cols
-            grid.paste(img, (col * w, row * h))
+            grid.paste(img, (col * tile_w, row * tile_h))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         grid.save(out_path, format="JPEG", quality=85)
         return out_path
@@ -270,8 +288,7 @@ class Screenshotter:
         expected = cols * rows
         if n != expected:
             raise ValueError("时间点数量与网格大小不匹配")
-        w = width or self.cfg.low_width
-        h = height or self.cfg.low_height
+        w, h = self._grid_tile_shape(width, height)
 
         t_min = max(0.0, float(min(timestamps)) - 1.0)
         t_max = float(max(timestamps)) + 1.0

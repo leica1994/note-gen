@@ -38,10 +38,20 @@ class ScreenshotConfig(BaseModel):
 
     ffmpeg_path: str = Field(default="ffmpeg", description="ffmpeg 可执行文件路径")
     ffprobe_path: str = Field(default="ffprobe", description="ffprobe 可执行文件路径")
-    low_width: int = Field(default=640, description="九宫格单格低清宽度")
-    low_height: int = Field(default=360, description="九宫格单格低清高度")
+    low_width: int = Field(default=960, description="九宫格单格低清宽度")
+    low_height: int = Field(default=540, description="九宫格单格低清高度")
     grid_columns: int = Field(default=3, description="九宫格列数")
     grid_rows: int = Field(default=3, description="九宫格行数")
+    grid_min_width: int = Field(
+        default=960,
+        ge=1,
+        description="九宫格单格最小宽度，用于保障发给多模态模型的截图清晰度",
+    )
+    grid_min_height: int = Field(
+        default=540,
+        ge=1,
+        description="九宫格单格最小高度，用于保障发给多模态模型的截图清晰度",
+    )
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
     include_endpoints: bool = Field(
         default=True,
@@ -55,6 +65,18 @@ class ScreenshotConfig(BaseModel):
                                    description="ffmpeg -hwaccel 参数（如 cuda/qsv/dxva2/vaapi），默认 None 关闭")
     hwaccel_device: Optional[str] = Field(default=None,
                                           description="ffmpeg -hwaccel_device（如 cuda:0 或 /dev/dri/renderD128），默认 None")
+
+    @model_validator(mode="after")
+    def _ensure_minimum_resolution(self):
+        min_w = max(1, self.grid_min_width)
+        min_h = max(1, self.grid_min_height)
+        object.__setattr__(self, "grid_min_width", min_w)
+        object.__setattr__(self, "grid_min_height", min_h)
+        if self.low_width < min_w:
+            object.__setattr__(self, "low_width", min_w)
+        if self.low_height < min_h:
+            object.__setattr__(self, "low_height", min_h)
+        return self
 
     @property
     def grid_count(self) -> int:
