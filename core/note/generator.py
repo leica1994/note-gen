@@ -39,8 +39,6 @@ from core.utils.retry import RetryPolicy
 from dataclasses import dataclass, field
 
 
-from core.note.models import SelectionDebug, TileEvaluation
-
 @dataclass
 class ParagraphRenderTask:
     chapter_index: int
@@ -551,131 +549,47 @@ class NoteGenerator:
             if abs(p.start_sec - min_line_start) > eps or abs(p.end_sec - max_line_end) > eps:
                 raise ValueError("段落边界应等于该段落所有行的最小开始与最大结束")
 
-    def _choose_best_frame(
-        self,
-        para: Paragraph,
-        grid_path: Path,
-        ci: int,
-        pi: int,
-    ) -> int:
+    def _choose_best_frame(self, para: Paragraph, grid_path: Path, ci: int, pi: int, subpath: str | None = None) -> int:
         text = "\n".join(f"{s.line_no}: {s.text}" for s in para.lines)
-        instruction_core = dedent(
+        instruction = dedent(
             f"""
             你是一名行情图像取证官，需要在九宫格截图（按左到右、上到下编号 1..9）中选出最能支撑段落观点的一张。
 
-            请在心中完成以下步骤：
+            请在心中完成以下步骤后，仅返回编号（不要输出其他文字）：
             1. 通读段落，列出需要关注的要点：
                • 核心术语/概念（趋势、震荡、具体信号、示例名称等）。
                • 视觉提示（任何颜色的箭头、框选、高亮、符号、放大区域等）。段落明确强调的颜色或符号视为最高优先级线索。
                • 结构特征（实体/影线比例、走势变化、是否多案例对比、上下文关系等）。
             2. 先对九宫格进行“过渡帧过滤”：
                • 逐帧检查是否存在淡入淡出、残影/双画面、镜头切换、模糊拖影或遮挡等现象。
-               • 判断过渡帧的关键信号包括：同一标题/图表/坐标轴同时出现两份（位置略有错位或透明度不同）、文字或图形边缘出现半透明阴影、屏幕左右/上方残留上一帧的导航条或背景、整幅画面亮度叠加导致整体发灰、K 线/标注被前一帧的淡影覆盖。
-               • 发现任何信号即把该帧加入“弃用列表”，并从后续流程中排除。仅当九宫格所有帧都落入弃用列表时，才在最后不得不从中挑选问题最少的一张。
+               • 判断过渡帧的关键信号包括：同一标题/图表/坐标轴同时出现两份（位置略有错位或透明度不同）、文字或图形边缘出现半透明阴影、屏幕左/右/上方残留上一帧的导航条或背景、整幅画面亮度叠加导致整体发灰、K 线/标注被前一帧的淡影覆盖。
+               • 发现任一信号即把该帧加入“弃用列表”，并从后续流程中排除。仅当九宫格所有帧都落入弃用列表时，才在最后不得不从中挑选问题最少的一张。
             3. 在剩余的“有效帧”中完成“内容分组”：
                • 根据主体、布局、文字标注、背景或场景判断是否为同一画面；几乎相同或仅存在轻微时间过渡的帧视为同组。
                • 如果某组只剩一张有效帧，直接把它作为该组代表；若某组完全被淘汰，则忽略该组。
-            4. 对每个分组挑选一张“代表帧” ：
+            4. 对每个分组挑选一张“代表帧”：
                 • 在组内有效帧中，优先选择无残影、无模糊、无文字错位且细节清晰的一张；若同组曾包含过渡帧，已在前一步被剔除，不得再使用。
-                • 若该组仅剩一张有效帧，直接采用；若完全没有有效帧则整组舍弃。只有当所有组都被舍弃时，才会回到弃用列表中挑选问题最少的一张（需记录限制）。
+                • 若该组仅剩一张有效帧，直接采用；若完全没有有效帧则整组舍弃。只有当所有组都被舍弃时，才会回到弃用列表中寻找问题最少的一张（需记录限制）。
             5. 针对代表帧，与段落要点逐项比对并在心中计分：
-                • 每命中一个术语/概念 +2 分（同一要素多次提及可累积）。
+                • 每命中一个术语/概念 +2 分（同一要素多次提及可累计）。
                 • 每命中一项视觉提示 +3 分；无需判断箭头方向是否“正确”，只要该标记出现即视为命中。
                 • 每命中一项结构特征 +2 分（如实体小于总高度一半、长影线、成组对比等）。
                 • 主题契合 0~2 分（是否完整呈现段落强调的核心情境）。
                 • 信息支撑 0~1 分（是否提供段落提到的上下文、对照或解释）。
                 • 仅当代表帧存在明显模糊、遮挡、过曝、严重裁剪等问题时才扣 2 分；否则不要扣分。
             6. 比较所有代表帧：
-               • 若至少一张代表帧命中所有高优先级视觉提示（段落明确提到的箭头/符号/颜色框等），应在这些候选中选择得分最高的一张。
+               • 若至少一张代表帧命中了所有高优先级视觉提示（段落明确提到的箭头/符号/颜色框等），应在这些候选中选择得分最高的一张。
                • 若同组多张画面几乎相同，先比较其清晰度与重影情况，仅在无重影且细节完整的帧之间继续评分；如仍难区分，优先选取时间上更靠后的稳定帧（通常是过渡结束后的第一张稳定画面）。
                • 若没有任何代表帧命中全部视觉提示，则在代表帧中选择得分最高的一张；若无有效代表帧可选，才在弃用列表中挑选问题最少的一张并说明限制。
                • 如仍并列，选择画面最清晰、信息最完整、且时间位置最能支撑段落核心的代表帧。
 
             段落内容：
             {text}
+
+            请只返回 1..9 中的一个数字。
             """
         )
-        structured_suffix = dedent(
-            """
-            请按照以下 JSON schema 输出：
-            {
-              "best_index": 1..9,
-              "evaluations": [
-                {
-                  "index": 1..9,
-                  "score": number,
-                  "reason": string,
-                  "issues": [string]
-                }
-              ]
-            }
-            - evaluations 必须覆盖九宫格全部编号，并按 index 升序输出。
-            - issues 仅能使用下列标签：transition、overlay、duplicate、blur、obstruction、text_overlap、empty、other。无问题时返回 []。
-            - 发现淡入淡出、重影、镜头切换造成的双画面或字幕叠加时，务必在 issues 中加入 "transition" 或 "overlay"，除非九帧全有问题，否则不要把这些帧设为 best_index。
-            - score 取 0~100 范围，越高代表与段落要点和视觉线索越契合。
-            """
-        )
-        structured_instruction = instruction_core + structured_suffix
-        numeric_instruction = instruction_core + "\n请只返回 1..9 中的一个数字。\n"
-        image = self._ensure_paragraph_image(para)
-        chosen: int | None = None
-        debug: SelectionDebug | None = None
-        blocked: List[Dict[str, Any]] = []
-        try:
-            debug = self.mm_llm.structured_choose(
-                SelectionDebug, structured_instruction, str(grid_path)
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "多模态选图结构化输出失败，降级为数字模式",
-                extra={
-                    "chapter_index": ci,
-                    "para_index": pi,
-                    "grid": str(grid_path),
-                    "error": str(exc),
-                },
-            )
-        else:
-            issue_blocklist = {"transition", "overlay", "duplicate"}
-            valid_evals: List[TileEvaluation] = []
-            for item in debug.evaluations:
-                normalized = {
-                    issue.strip().lower()
-                    for issue in item.issues
-                    if isinstance(issue, str) and issue.strip()
-                }
-                item.issues = sorted(normalized)
-                if normalized & issue_blocklist:
-                    blocked.append({"index": item.index, "issues": item.issues})
-                    continue
-                valid_evals.append(item)
-            if valid_evals:
-                valid_evals.sort(key=lambda ev: (float(ev.score), ev.index))
-                chosen_eval = valid_evals[-1]
-                chosen = int(chosen_eval.index)
-            else:
-                chosen = int(debug.best_index)
-            debug.filtered_index = chosen
-        if debug:
-            image.selection_debug = debug
-        else:
-            image.selection_debug = None
-        if chosen is None:
-            chosen = int(self.mm_llm.choose_index(numeric_instruction, str(grid_path)))
-        if blocked:
-            self.logger.info(
-                "多模态选图自动过滤过渡帧",
-                extra={
-                    "chapter_index": ci,
-                    "para_index": pi,
-                    "grid": str(grid_path),
-                    "blocked": [
-                        f"{item['index']}:{'/'.join(item['issues'])}" for item in blocked
-                    ],
-                    "filtered_index": chosen,
-                    "model_best": debug.best_index if debug else None,
-                },
-            )
+        chosen = int(self.mm_llm.choose_index(instruction, str(grid_path)))
         self.logger.info(
             "多模态选图结果",
             extra={
@@ -683,7 +597,6 @@ class NoteGenerator:
                 "para_index": pi,
                 "grid": str(grid_path),
                 "chosen": chosen,
-                "mode": "structured" if debug else "fallback",
             },
         )
         return chosen

@@ -14,9 +14,6 @@ class ParagraphImage(BaseModel):
     chosen_index: Optional[int] = None  # 1..9
     chosen_timestamp_sec: Optional[float] = None
     hi_res_image_path: Optional[Path] = None
-    selection_debug: Optional["SelectionDebug"] = Field(
-        default=None, description="多模态选图结构化评估结果"
-    )
 
 
 class Paragraph(BaseModel):
@@ -145,23 +142,13 @@ class ParagraphOptimizationSchema(BaseModel):
 
 class TileEvaluation(BaseModel):
     index: int = Field(ge=1, le=9)
-    score: float = Field(ge=0.0, description="综合评分，数值越高代表画面越契合需求")
-    reason: str = Field(default="", description="命中要点、扣分原因等关键信息")
-    issues: List[str] = Field(
-        default_factory=list,
-        description="问题标签，如 transition/duplicate/overlay/blur 等",
-    )
+    score: float
+    reason: str = Field(default="")
 
 
 class SelectionDebug(BaseModel):
     best_index: int = Field(ge=1, le=9)
     evaluations: List[TileEvaluation]
-    filtered_index: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=9,
-        description="过滤掉过渡、重影等问题帧后得到的索引",
-    )
 
 
 class SelectedIndexSchema(BaseModel):
