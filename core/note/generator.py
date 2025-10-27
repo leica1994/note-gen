@@ -993,10 +993,7 @@ class NoteGenerator:
                 fut = ex.submit(
                     self._choose_best_frame,
                     task.paragraph,
-                    task.grid_path,
-                    task.chapter_index,
-                    task.paragraph_index,
-                    task.label,
+                    task.grid_path
                 )
                 futures[fut] = task
                 self.logger.info(
