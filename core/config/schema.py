@@ -52,6 +52,12 @@ class ScreenshotConfig(BaseModel):
         ge=1,
         description="九宫格单格最小高度，用于保障发给多模态模型的截图清晰度",
     )
+    png_compression_level: int = Field(
+        default=9,
+        ge=0,
+        le=9,
+        description="PNG 压缩等级，0 为最快、9 为最小体积（仍保持无损）",
+    )
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
     include_endpoints: bool = Field(
         default=True,

@@ -125,8 +125,21 @@ class Screenshotter:
         if width and height:
             cmd += ["-vf", f"scale={width}:{height}"]
         if suffix == ".png":
-            # PNG 保持无损质量，强制使用无损编码并避免质量参数干扰
-            cmd += ["-f", "image2", "-vcodec", "png", "-compression_level", "0"]
+            level_raw = getattr(self.cfg, "png_compression_level", 9)
+            try:
+                level = int(level_raw)
+            except (TypeError, ValueError):
+                level = 9
+            # clamp 到 0-9，PNG 压缩仍为无损，仅影响编码耗时与文件体积
+            level = max(0, min(9, level))
+            cmd += [
+                "-f",
+                "image2",
+                "-vcodec",
+                "png",
+                "-compression_level",
+                str(level),
+            ]
         elif quality is not None:
             cmd += ["-q:v", str(quality)]
         cmd += ["-y", str(out_path)]
