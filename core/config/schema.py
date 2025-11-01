@@ -58,6 +58,18 @@ class ScreenshotConfig(BaseModel):
         le=9,
         description="PNG 压缩等级，0 为最快、9 为最小体积（仍保持无损）",
     )
+    png_force_rgb24: bool = Field(
+        default=True,
+        description="PNG 输出时是否强制转换为 RGB24（去掉透明通道以减小体积）",
+    )
+    png_optimize: bool = Field(
+        default=True,
+        description="是否使用 pyoxipng 对 PNG 做无损优化（保持分辨率与画质）",
+    )
+    png_strip_metadata: bool = Field(
+        default=True,
+        description="pyoxipng 优化时是否剥离非必要元数据（保留解码所需字段）",
+    )
     hi_quality: int = Field(default=2, ge=2, le=31, description="ffmpeg -q:v 值，数值越小质量越高")
     include_endpoints: bool = Field(
         default=True,

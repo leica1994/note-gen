@@ -53,6 +53,10 @@ core/utils/            # 日志、哈希、重试、脱敏
   - `ffmpeg_path`、`low_width/low_height`、`grid_columns/rows`、`hi_quality`；
   - `edge_margin_sec`：默认 `0.5` 秒，时间点避开段落首尾；
   - `max_workers`：截图并发。
+  - `png_compression_level`：PNG 压缩等级，0 最快 9 最小体积（无损）。
+  - `png_force_rgb24`：PNG 输出时去除透明通道（RGB24），保持分辨率与无损画质。
+  - `png_optimize`：是否启用 pyoxipng 执行无损优化（失败仅记录日志）。
+  - `png_strip_metadata`：pyoxipng 优化时是否剥离非必要元数据。
 - 导出（`export`）：`outputs_root`、`logs_root`。
 - 笔记（`note`）：
   - `mode = subtitle | optimized`

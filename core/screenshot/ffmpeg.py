@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import bisect
+import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Iterable, List
@@ -9,9 +12,8 @@ from PIL import Image
 from core.config.schema import ScreenshotConfig
 from core.utils.retry import RetryPolicy
 
+logger = logging.getLogger(__name__)
 
-import bisect
-import json
 
 class Screenshotter:
     """基于 ffmpeg 的截图工具。
@@ -38,6 +40,63 @@ class Screenshotter:
                 args += ["-hwaccel_device", str(self.cfg.hwaccel_device)]
         return args
 
+    def _extend_png_command(self, cmd: list[str]) -> None:
+        """补充 PNG 编码参数，维持无损前提下尽量减小体积。"""
+
+        level_raw = getattr(self.cfg, "png_compression_level", 9)
+        try:
+            level = int(level_raw)
+        except (TypeError, ValueError):
+            level = 9
+        level = max(0, min(9, level))
+        cmd += [
+            "-f",
+            "image2",
+            "-vcodec",
+            "png",
+            "-compression_level",
+            str(level),
+        ]
+        if getattr(self.cfg, "png_force_rgb24", True):
+            # 通常视频帧不存在透明通道，强制 RGB24 可在不损失画质的情况下缩小体积。
+            cmd += ["-pix_fmt", "rgb24"]
+
+    def _optimize_png(self, path: Path) -> None:
+        """调用 pyoxipng 对 PNG 做无损优化，失败时记录日志而不中断流程。"""
+
+        if path.suffix.lower() != ".png":
+            return
+        if not getattr(self.cfg, "png_optimize", True):
+            return
+        try:
+            import oxipng  # type: ignore[import-not-found]
+        except ImportError:
+            logger.info("未安装 pyoxipng，跳过 PNG 无损优化")
+            return
+
+        strip_meta = bool(getattr(self.cfg, "png_strip_metadata", True))
+        strip_option = oxipng.StripChunks.safe() if strip_meta else oxipng.StripChunks.none()
+
+        level_raw = getattr(self.cfg, "png_compression_level", 9)
+        try:
+            base_level = int(level_raw)
+        except (TypeError, ValueError):
+            base_level = 9
+        # 将 0-9 的压缩等级映射为 oxipng 的 0-6 预设档位
+        oxipng_level = max(0, min(6, round(base_level * 6 / 9)))
+
+        try:
+            oxipng.optimize(
+                str(path),
+                level=oxipng_level,
+                strip=strip_option,
+                # 允许 bit depth/color 减少，同默认即可无损压缩
+            )
+        except oxipng.PngError as exc:  # type: ignore[attr-defined]
+            logger.warning("pyoxipng 优化 PNG 失败：%s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pyoxipng 优化 PNG 遇到未知异常：%s", exc)
+
     def _run_ffmpeg_fast_seek(self, video: Path, out_path: Path, ts_sec: float,
                               width: int | None = None, height: int | None = None,
                               quality: int | None = None) -> None:
@@ -57,7 +116,10 @@ class Screenshotter:
         ]
         if width and height:
             cmd += ["-vf", f"scale={width}:{height}"]
-        if quality is not None:
+        suffix = out_path.suffix.lower()
+        if suffix == ".png":
+            self._extend_png_command(cmd)
+        elif quality is not None:
             cmd += ["-q:v", str(quality)]
         cmd += ["-y", str(out_path)]
 
@@ -70,7 +132,9 @@ class Screenshotter:
         # 修正：RetryPolicy 作为装饰器使用，不接受分类器参数；
         # 之前传入 _classify_ffmpeg 会导致返回字符串，被当作可调用引发 TypeError。
         wrapped = self._retry(_invoke)
-        return wrapped()
+        result = wrapped()
+        self._optimize_png(out_path)
+        return result
 
     def _grid_tile_shape(
         self,
@@ -125,21 +189,7 @@ class Screenshotter:
         if width and height:
             cmd += ["-vf", f"scale={width}:{height}"]
         if suffix == ".png":
-            level_raw = getattr(self.cfg, "png_compression_level", 9)
-            try:
-                level = int(level_raw)
-            except (TypeError, ValueError):
-                level = 9
-            # clamp 到 0-9，PNG 压缩仍为无损，仅影响编码耗时与文件体积
-            level = max(0, min(9, level))
-            cmd += [
-                "-f",
-                "image2",
-                "-vcodec",
-                "png",
-                "-compression_level",
-                str(level),
-            ]
+            self._extend_png_command(cmd)
         elif quality is not None:
             cmd += ["-q:v", str(quality)]
         cmd += ["-y", str(out_path)]
@@ -151,7 +201,9 @@ class Screenshotter:
             return None
 
         wrapped = self._retry(_invoke)
-        return wrapped()
+        result = wrapped()
+        self._optimize_png(out_path)
+        return result
 
     def align_timestamps_to_frames(
         self,
